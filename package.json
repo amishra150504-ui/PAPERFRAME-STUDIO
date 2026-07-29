@@ -1,0 +1,25 @@
+{
+  "name": "paperframe-studio",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && node scripts/generate-seo.mjs",
+    "preview": "vite preview",
+    "test": "node scripts/smoke-test.mjs"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "jspdf": "^4.2.1",
+    "lucide-react": "^0.468.0",
+    "pdf-lib": "^1.17.1",
+    "pdfjs-dist": "^5.4.624",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+    ,"tesseract.js": "^6.0.1"
+  },
+  "devDependencies": {
+    "vite": "^6.0.5"
+  }
+}

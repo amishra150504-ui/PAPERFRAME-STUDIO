@@ -1,0 +1,23 @@
+{
+  "name": "Paperframe Studio",
+  "short_name": "Paperframe",
+  "description": "Free private A4 photo layout and PDF editing tools that run locally in your browser.",
+  "scope": "/",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3f4f1",
+  "theme_color": "#252824",
+  "icons": [
+    {
+      "src": "/assets/paperframe-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/assets/paperframe-logo.png",
+      "sizes": "685x841",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
