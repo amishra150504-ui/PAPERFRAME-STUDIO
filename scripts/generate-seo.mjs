@@ -18,7 +18,8 @@ const pages = ['/', '/about.html', '/help.html', '/privacy.html'];
 const today = new Date().toISOString().slice(0, 10);
 const sitemap = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${pages.map(path => `  <url><loc>${base}${path}</loc><lastmod>${today}</lastmod></url>`).join('\n')}\n</urlset>\n`;
 writeFileSync(resolve(output, 'sitemap.xml'), sitemap);
-writeFileSync(resolve(output, 'robots.txt'), `User-agent: *\nAllow: /\n\nSitemap: ${base}/sitemap.xml\n`);
+writeFileSync(resolve(output, 'sitemap.txt'), `${pages.map(path => `${base}${path}`).join('\n')}\n`);
+writeFileSync(resolve(output, 'robots.txt'), `User-agent: *\nAllow: /\n\nSitemap: ${base}/sitemap.xml\nSitemap: ${base}/sitemap.txt\n`);
 for (const file of ['index.html', 'about.html', 'help.html', 'privacy.html']) {
   const path = resolve(output, file);
   const pagePath = file === 'index.html' ? '/' : `/${file}`;
