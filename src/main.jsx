@@ -954,7 +954,7 @@ function CompareTool({ notify }) {
     <div className="comparison-note">This local comparison detects text and page-count changes. Scanned image differences require OCR first.</div></div>;
 }
 
-function EditTool({ notify }) {
+function LegacyEditTool({ notify }) {
   const [item, setItem] = useState(null), [kind, setKind] = useState('visual'), [page, setPage] = useState(1), [text, setText] = useState('Approved');
   const [size, setSize] = useState(24), [x, setX] = useState(10), [y, setY] = useState(10), [color, setColor] = useState('#d8673f'), [image, setImage] = useState(null), [busy, setBusy] = useState(false);
   const [detectedText, setDetectedText] = useState([]), [selectedText, setSelectedText] = useState(''), [replacement, setReplacement] = useState(''), [scanning, setScanning] = useState(false);
@@ -1175,6 +1175,323 @@ function EditTool({ notify }) {
       {kind === 'text' && <><label className="pdf-tool-field wide"><span>Text</span><input value={text} onChange={e => setText(e.target.value)} /></label><label className="pdf-tool-field"><span>Font size</span><input type="number" min="6" max="120" value={size} onChange={e => setSize(Number(e.target.value))} /></label></>}
       {kind === 'image' && <label className="pdf-tool-field wide"><span>PNG or JPEG image</span><input type="file" accept="image/png,image/jpeg" onChange={e => setImage(e.target.files[0])} /></label>}</div>}
     <button className="primary tool-main-action" disabled={busy} onClick={apply}><Download size={16} /> Apply and download</button></div>;
+}
+
+function ProPdfPageThumbnail({ item, number, active, onClick }) {
+  const ref = useRef();
+  useEffect(() => {
+    let cancelled = false, task;
+    (async () => {
+      try {
+        const data = item.bytes instanceof Uint8Array ? item.bytes.slice() : new Uint8Array(item.bytes.slice(0));
+        task = pdfjsLib.getDocument({ data });
+        const pdf = await task.promise, pdfPage = await pdf.getPage(number), viewport = pdfPage.getViewport({ scale: .22 });
+        if (cancelled || !ref.current) return;
+        const canvas = ref.current, context = canvas.getContext('2d');
+        canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
+        await pdfPage.render({ canvasContext: context, viewport }).promise;
+      } catch {}
+    })();
+    return () => { cancelled = true; task?.destroy(); };
+  }, [item, number]);
+  return <button className={`pro-thumb ${active ? 'active' : ''}`} onClick={onClick}>
+    <span><canvas ref={ref} /></span><b>{number}</b>
+  </button>;
+}
+
+const proFonts = {
+  Helvetica: { regular: StandardFonts.Helvetica, bold: StandardFonts.HelveticaBold, italic: StandardFonts.HelveticaOblique, boldItalic: StandardFonts.HelveticaBoldOblique },
+  Times: { regular: StandardFonts.TimesRoman, bold: StandardFonts.TimesRomanBold, italic: StandardFonts.TimesRomanItalic, boldItalic: StandardFonts.TimesRomanBoldItalic },
+  Courier: { regular: StandardFonts.Courier, bold: StandardFonts.CourierBold, italic: StandardFonts.CourierOblique, boldItalic: StandardFonts.CourierBoldOblique }
+};
+
+function EditTool({ notify }) {
+  const [item, setItem] = useState(null), [page, setPage] = useState(1), [zoom, setZoom] = useState(1.15);
+  const [pageItems, setPageItems] = useState({}), [selectedIds, setSelectedIds] = useState([]);
+  const [history, setHistory] = useState([]), [future, setFuture] = useState([]), [rendering, setRendering] = useState(false);
+  const [mode, setMode] = useState('select'), [rightPanel, setRightPanel] = useState('format'), [busy, setBusy] = useState(false);
+  const [findText, setFindText] = useState(''), [replaceText, setReplaceText] = useState('');
+  const [ocrLanguage, setOcrLanguage] = useState('eng'), [ocrProgress, setOcrProgress] = useState(null);
+  const [pageInfo, setPageInfo] = useState({ width: 595, height: 842, nativeText: 0 }), [preflightOpen, setPreflightOpen] = useState(false);
+  const [watermark, setWatermark] = useState(''), [pageNumbers, setPageNumbers] = useState(false);
+  const canvasRef = useRef(), imageInputRef = useRef(), scale = zoom;
+  const items = pageItems[page] || [], selected = items.find(entry => entry.id === selectedIds[selectedIds.length - 1]);
+  const changedCount = Object.values(pageItems).flat().filter(entry => entry.changed).length;
+  const allTextCount = Object.values(pageItems).flat().length;
+
+  const load = async files => {
+    try {
+      const loaded = await loadPdfItem(files[0]);
+      let recovered = {};
+      try { recovered = JSON.parse(localStorage.getItem(`paperframe-pdf-session:${loaded.name}`) || '{}'); } catch {}
+      setItem(loaded); setPage(1); setPageItems(recovered); setSelectedIds([]); setHistory([]); setFuture([]);
+      notify(loaded.repaired ? 'The PDF was repaired and opened in Studio Editor' : 'PDF opened in Studio Editor');
+    } catch { notify('Could not read this PDF. It may be encrypted, damaged, or unsupported.'); }
+  };
+
+  useEffect(() => {
+    if (!item || !Object.keys(pageItems).length) return;
+    const timer = setTimeout(() => {
+      try { localStorage.setItem(`paperframe-pdf-session:${item.name}`, JSON.stringify(pageItems)); } catch {}
+    }, 500);
+    return () => clearTimeout(timer);
+  }, [item, pageItems]);
+
+  useEffect(() => {
+    const onKey = event => {
+      if (!(event.ctrlKey || event.metaKey) && event.key !== 'Delete' && event.key !== 'Escape') return;
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') { event.preventDefault(); event.shiftKey ? redo() : undo(); }
+      else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); }
+      else if (event.key === 'Delete' && document.activeElement?.tagName !== 'TEXTAREA' && document.activeElement?.tagName !== 'INPUT') removeSelected();
+      else if (event.key === 'Escape') setSelectedIds([]);
+    };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  });
+
+  useEffect(() => {
+    if (!item) return;
+    let cancelled = false, loading;
+    (async () => {
+      setRendering(true); setSelectedIds([]);
+      try {
+        const data = item.bytes instanceof Uint8Array ? item.bytes.slice() : new Uint8Array(item.bytes.slice(0));
+        loading = pdfjsLib.getDocument({ data });
+        const pdf = await loading.promise, pdfPage = await pdf.getPage(page), viewport = pdfPage.getViewport({ scale });
+        const canvas = canvasRef.current;
+        if (!canvas || cancelled) return;
+        const ratio = Math.min(window.devicePixelRatio || 1, 2), context = canvas.getContext('2d');
+        canvas.width = Math.floor(viewport.width * ratio); canvas.height = Math.floor(viewport.height * ratio);
+        canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`;
+        await pdfPage.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] }).promise;
+        const content = await pdfPage.getTextContent(), fragments = content.items.filter(entry => entry.str?.trim()).map((entry, index) => {
+          const transformed = pdfjsLib.Util.transform(viewport.transform, entry.transform);
+          const fontHeight = Math.max(6, Math.hypot(transformed[2], transformed[3]));
+          return {
+            id: `native-${page}-${index}`, type: 'text', text: entry.str, originalText: entry.str,
+            left: transformed[4], top: transformed[5] - fontHeight, width: Math.max(entry.width * scale, 10), height: fontHeight * 1.18,
+            pdfX: entry.transform[4], pdfY: entry.transform[5], pdfWidth: Math.max(entry.width, 2), pdfHeight: Math.max(entry.height || Math.abs(entry.transform[3]) || 8, 6),
+            font: 'Helvetica', size: Math.max(entry.height || Math.abs(entry.transform[3]) || 8, 6), bold: false, italic: false,
+            align: 'left', color: '#111111', background: '#ffffff', opacity: 100, changed: false, source: 'native'
+          };
+        });
+        const merged = [];
+        fragments.forEach(fragment => {
+          const previous = merged[merged.length - 1], gap = previous ? fragment.left - (previous.left + previous.width) : 999;
+          const sameLine = previous && Math.abs(previous.top - fragment.top) <= Math.max(previous.height, fragment.height) * .38;
+          if (sameLine && gap >= -2 && gap <= Math.max(previous.height, fragment.height) * 1.8) {
+            previous.text += `${gap > previous.height * .12 ? ' ' : ''}${fragment.text}`; previous.originalText = previous.text;
+            previous.width = Math.max(previous.width, fragment.left + fragment.width - previous.left);
+            previous.pdfWidth = Math.max(previous.pdfWidth, fragment.pdfX + fragment.pdfWidth - previous.pdfX);
+          } else merged.push({ ...fragment, id: `text-${page}-${merged.length}` });
+        });
+        if (!cancelled) {
+          setPageInfo({ width: viewport.width, height: viewport.height, nativeText: merged.length });
+          setPageItems(current => current[page] ? current : { ...current, [page]: merged });
+        }
+      } catch { if (!cancelled) notify('This page could not be rendered'); }
+      if (!cancelled) setRendering(false);
+    })();
+    return () => { cancelled = true; loading?.destroy(); };
+  }, [item, page, scale]);
+
+  const snapshot = () => JSON.parse(JSON.stringify(pageItems));
+  const commit = updater => {
+    setHistory(stack => [...stack.slice(-59), snapshot()]); setFuture([]);
+    setPageItems(current => typeof updater === 'function' ? updater(current) : updater);
+  };
+  const undo = () => {
+    if (!history.length) return;
+    setFuture(stack => [...stack, snapshot()]); setPageItems(history[history.length - 1]); setHistory(stack => stack.slice(0, -1)); setSelectedIds([]);
+  };
+  const redo = () => {
+    if (!future.length) return;
+    setHistory(stack => [...stack, snapshot()]); setPageItems(future[future.length - 1]); setFuture(stack => stack.slice(0, -1)); setSelectedIds([]);
+  };
+  const updateSelected = patch => {
+    if (!selectedIds.length) return;
+    commit(current => ({ ...current, [page]: (current[page] || []).map(entry => selectedIds.includes(entry.id) ? { ...entry, ...patch, changed: true } : entry) }));
+  };
+  const selectItem = (id, event) => setSelectedIds(current => event?.ctrlKey || event?.metaKey ? (current.includes(id) ? current.filter(value => value !== id) : [...current, id]) : [id]);
+  const beginDrag = (entry, event) => {
+    if (event.button !== 0) return;
+    event.preventDefault(); event.stopPropagation(); setSelectedIds([entry.id]);
+    const startX = event.clientX, startY = event.clientY, originalX = entry.pdfX, originalY = entry.pdfY;
+    setHistory(stack => [...stack.slice(-59), snapshot()]); setFuture([]);
+    const move = moveEvent => setPageItems(current => ({ ...current, [page]: (current[page] || []).map(value => value.id === entry.id ? { ...value, pdfX: Math.max(0, originalX + (moveEvent.clientX - startX) / scale), pdfY: Math.max(0, originalY - (moveEvent.clientY - startY) / scale), changed: true } : value) }));
+    const stop = () => { window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', stop); };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', stop);
+  };
+  const removeSelected = () => {
+    if (!selectedIds.length) return;
+    commit(current => ({ ...current, [page]: current[page].filter(entry => !selectedIds.includes(entry.id)) })); setSelectedIds([]);
+  };
+  const addTextBox = () => {
+    const id = `added-${page}-${Date.now()}`, entry = {
+      id, type: 'text', text: 'Type here', originalText: '', left: pageInfo.width * .2, top: pageInfo.height * .2,
+      width: 210, height: 34, pdfX: pageInfo.width * .2 / scale, pdfY: (pageInfo.height * .8 / scale), pdfWidth: 210 / scale,
+      pdfHeight: 18, font: 'Helvetica', size: 18, bold: false, italic: false, align: 'left', color: '#111111', background: '#ffffff', opacity: 100, changed: true, source: 'added'
+    };
+    commit(current => ({ ...current, [page]: [...(current[page] || []), entry] })); setSelectedIds([id]); setMode('select');
+  };
+  const addBox = type => {
+    const id = `${type}-${page}-${Date.now()}`, entry = {
+      id, type, left: pageInfo.width * .25, top: pageInfo.height * .25, width: 180, height: 90,
+      pdfX: pageInfo.width * .25 / scale, pdfY: pageInfo.height * .65 / scale, pdfWidth: 180 / scale, pdfHeight: 90 / scale,
+      color: type === 'highlight' ? '#ffda45' : type === 'redaction' ? '#000000' : '#d8673f', background: type === 'highlight' ? '#ffda45' : type === 'redaction' ? '#000000' : '#ffffff',
+      opacity: type === 'highlight' ? 42 : 100, borderWidth: type === 'shape' ? 2 : 0, changed: true, source: 'added'
+    };
+    commit(current => ({ ...current, [page]: [...(current[page] || []), entry] })); setSelectedIds([id]);
+  };
+  const addImage = async file => {
+    if (!file || !/^image\/(png|jpeg)$/.test(file.type)) return notify('Choose a PNG or JPEG image');
+    const dataUrl = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = reject; reader.readAsDataURL(file); });
+    const id = `image-${page}-${Date.now()}`, entry = { id, type: 'image', dataUrl, pdfX: pageInfo.width * .25 / scale, pdfY: pageInfo.height * .6 / scale, pdfWidth: 180 / scale, pdfHeight: 120 / scale, opacity: 100, rotation: 0, changed: true, source: 'added' };
+    commit(current => ({ ...current, [page]: [...(current[page] || []), entry] })); setSelectedIds([id]);
+  };
+  const replaceAll = () => {
+    if (!findText) return;
+    let matches = 0;
+    commit(current => Object.fromEntries(Object.entries(current).map(([number, entries]) => [number, entries.map(entry => {
+      if (entry.type !== 'text' || !entry.text.toLowerCase().includes(findText.toLowerCase())) return entry;
+      matches += 1; return { ...entry, text: entry.text.replaceAll(findText, replaceText), changed: true };
+    })]))); notify(matches ? `${matches} text box${matches > 1 ? 'es' : ''} updated` : 'No matching text found');
+  };
+  const runOcr = async () => {
+    if (!canvasRef.current) return;
+    setOcrProgress(1);
+    try {
+      const { createWorker } = await import('tesseract.js');
+      const worker = await createWorker(ocrLanguage, 1, { logger: message => message.status === 'recognizing text' && setOcrProgress(Math.max(1, Math.round(message.progress * 100))) });
+      const result = await worker.recognize(canvasRef.current, {}, { blocks: true });
+      const lines = [];
+      (result.data.blocks || []).forEach(block => (block.paragraphs || []).forEach(paragraph => (paragraph.lines || []).forEach(line => line.text?.trim() && lines.push(line))));
+      const canvasWidth = parseFloat(canvasRef.current.style.width), canvasHeight = parseFloat(canvasRef.current.style.height);
+      const recognized = lines.map((line, index) => {
+        const box = line.bbox, left = box.x0 * canvasWidth / canvasRef.current.width, top = box.y0 * canvasHeight / canvasRef.current.height;
+        const width = Math.max((box.x1 - box.x0) * canvasWidth / canvasRef.current.width, 20), height = Math.max((box.y1 - box.y0) * canvasHeight / canvasRef.current.height, 12);
+        return { id: `ocr-${page}-${index}`, type: 'text', text: line.text.trim(), originalText: line.text.trim(), left, top, width, height,
+          pdfX: left / scale, pdfY: (canvasHeight - top - height) / scale, pdfWidth: width / scale, pdfHeight: height / scale,
+          font: 'Helvetica', size: Math.max(7, height / scale), bold: false, italic: false, align: 'left', color: '#111111', background: '#ffffff', opacity: 100,
+          changed: false, source: 'ocr', confidence: Math.round(line.confidence || 0) };
+      });
+      commit(current => ({ ...current, [page]: recognized })); setSelectedIds([]); await worker.terminate();
+      notify(recognized.length ? `${recognized.length} OCR lines are ready for direct editing` : 'OCR found no readable text');
+    } catch { notify('OCR failed. Check the selected language and scan quality.'); }
+    setOcrProgress(null);
+  };
+
+  const exportPdf = async () => {
+    setBusy(true);
+    try {
+      const doc = await PDFDocument.load(item.bytes), fontCache = {};
+      const getFont = async entry => {
+        const family = proFonts[entry.font] || proFonts.Helvetica, key = entry.bold ? (entry.italic ? 'boldItalic' : 'bold') : (entry.italic ? 'italic' : 'regular');
+        const cacheKey = `${entry.font}-${key}`;
+        if (!fontCache[cacheKey]) fontCache[cacheKey] = await doc.embedFont(family[key]);
+        return fontCache[cacheKey];
+      };
+      for (const [pageNumber, entries] of Object.entries(pageItems)) {
+        const pdfPage = doc.getPage(Number(pageNumber) - 1);
+        for (const entry of entries.filter(value => value.changed)) {
+          if (entry.type === 'shape' || entry.type === 'highlight' || entry.type === 'redaction') {
+            const [fr, fg, fb] = [1, 3, 5].map(index => parseInt(entry.background.slice(index, index + 2), 16) / 255);
+            const [sr, sg, sb] = [1, 3, 5].map(index => parseInt(entry.color.slice(index, index + 2), 16) / 255);
+            pdfPage.drawRectangle({ x: entry.pdfX, y: entry.pdfY, width: entry.pdfWidth, height: entry.pdfHeight, color: rgb(fr, fg, fb), opacity: entry.opacity / 100, borderColor: rgb(sr, sg, sb), borderWidth: entry.borderWidth || 0 });
+            continue;
+          }
+          if (entry.type === 'image') {
+            const bytes = await (await fetch(entry.dataUrl)).arrayBuffer(), embedded = entry.dataUrl.startsWith('data:image/png') ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
+            pdfPage.drawImage(embedded, { x: entry.pdfX, y: entry.pdfY, width: entry.pdfWidth, height: entry.pdfHeight, opacity: entry.opacity / 100, rotate: degrees(entry.rotation || 0) });
+            continue;
+          }
+          const [br, bg, bb] = [1, 3, 5].map(index => parseInt(entry.background.slice(index, index + 2), 16) / 255);
+          const [tr, tg, tb] = [1, 3, 5].map(index => parseInt(entry.color.slice(index, index + 2), 16) / 255);
+          const font = await getFont(entry), fontSize = Math.max(5, Number(entry.size || entry.pdfHeight));
+          const width = Math.max(entry.pdfWidth, 24), lineHeight = fontSize * 1.18;
+          const words = entry.text.split(/\s+/), lines = []; let current = '';
+          words.forEach(word => { const test = current ? `${current} ${word}` : word; if (current && font.widthOfTextAtSize(test, fontSize) > width) { lines.push(current); current = word; } else current = test; });
+          if (current || !lines.length) lines.push(current);
+          const coverHeight = Math.max(entry.pdfHeight + 4, lines.length * lineHeight + 4);
+          pdfPage.drawRectangle({ x: entry.pdfX - 2, y: entry.pdfY - coverHeight + entry.pdfHeight - 2, width: width + 4, height: coverHeight, color: rgb(br, bg, bb), opacity: entry.opacity / 100 });
+          lines.forEach((line, lineIndex) => {
+            const lineWidth = font.widthOfTextAtSize(line || ' ', fontSize);
+            const offset = entry.align === 'center' ? Math.max(0, (width - lineWidth) / 2) : entry.align === 'right' ? Math.max(0, width - lineWidth) : 0;
+            pdfPage.drawText(line || ' ', { x: entry.pdfX + offset, y: entry.pdfY - lineIndex * lineHeight, size: fontSize, font, color: rgb(tr, tg, tb), opacity: entry.opacity / 100 });
+          });
+        }
+      }
+      if (watermark || pageNumbers) {
+        const watermarkFont = await doc.embedFont(StandardFonts.HelveticaBold);
+        doc.getPages().forEach((pdfPage, index) => {
+          const box = pdfPage.getSize();
+          if (watermark) {
+            const fontSize = Math.max(26, Math.min(64, box.width / Math.max(7, watermark.length) * 1.4));
+            const width = watermarkFont.widthOfTextAtSize(watermark, fontSize);
+            pdfPage.drawText(watermark, { x: (box.width - width) / 2, y: box.height / 2, size: fontSize, font: watermarkFont, color: rgb(.55, .55, .55), opacity: .18, rotate: degrees(32) });
+          }
+          if (pageNumbers) pdfPage.drawText(`${index + 1} / ${doc.getPageCount()}`, { x: box.width / 2 - 12, y: 14, size: 9, font: watermarkFont, color: rgb(.35, .35, .35) });
+        });
+      }
+      savePdf(await doc.save({ useObjectStreams: true }), `${item.name.replace(/\.pdf$/i, '')}-paperframe-edited.pdf`); notify('Professional edited PDF downloaded');
+    } catch (error) { console.error(error); notify(error.message || 'Could not export the edited PDF'); }
+    setBusy(false);
+  };
+
+  if (!item) return <div className="pro-edit-welcome"><ToolDrop title="Open a PDF in Studio Editor" onFiles={load} /><div className="pro-capabilities"><span>Direct text editing</span><span>Scanned-page OCR</span><span>Font styling</span><span>Private local processing</span></div></div>;
+  const issues = [
+    !changedCount && 'No edits have been made yet.',
+    Object.values(pageItems).flat().some(entry => entry.source === 'ocr' && entry.confidence < 70) && 'Some OCR text has low recognition confidence.',
+    Object.keys(pageItems).length < item.pages && `${item.pages - Object.keys(pageItems).length} page(s) have not been analyzed yet.`,
+    'Standard PDF fonts are embedded during export; unavailable original fonts are substituted.'
+  ].filter(Boolean);
+  return <div className="pro-pdf-editor">
+    <div className="pro-editor-topbar">
+      <div className="pro-doc-title"><FileText size={18} /><span><strong>{item.name}</strong><small>{item.pages} pages · {changedCount} edits · Local autosession</small></span></div>
+      <div className="pro-top-actions"><IconButton label="Undo" disabled={!history.length} onClick={undo}><Undo2 size={17} /></IconButton><IconButton label="Redo" disabled={!future.length} onClick={redo}><Redo2 size={17} /></IconButton><button className="secondary" onClick={() => setPreflightOpen(!preflightOpen)}><Check size={14} /> Preflight</button><button className="primary" disabled={busy || (!changedCount && !watermark && !pageNumbers)} onClick={exportPdf}>{busy ? <LoaderCircle className="spin" size={15} /> : <Download size={15} />} Export PDF</button><button className="secondary" onClick={() => setItem(null)}>Close</button></div>
+    </div>
+    {preflightOpen && <div className="pro-preflight"><strong>Export preflight</strong>{issues.map((issue, index) => <span key={index}><Check size={13} />{issue}</span>)}</div>}
+    <div className="pro-editor-grid">
+      <aside className="pro-pages"><div className="pro-side-heading"><span>PAGES</span><b>{item.pages}</b></div><div className="pro-thumb-list">{Array.from({ length: item.pages }, (_, index) => <ProPdfPageThumbnail key={index + 1} item={item} number={index + 1} active={page === index + 1} onClick={() => setPage(index + 1)} />)}</div></aside>
+      <main className="pro-canvas-column">
+        <div className="pro-toolbar">
+          <button className={mode === 'select' ? 'active' : ''} onClick={() => setMode('select')}><Move size={14} /> Select</button>
+          <button onClick={addTextBox}><Plus size={14} /> Add text</button>
+          <button onClick={() => imageInputRef.current?.click()}><ImageIcon size={14} /> Image</button><input ref={imageInputRef} hidden type="file" accept="image/png,image/jpeg" onChange={event => addImage(event.target.files?.[0])} />
+          <button onClick={() => addBox('shape')}><Maximize2 size={14} /> Shape</button>
+          <button onClick={() => addBox('highlight')}><Sparkles size={14} /> Highlight</button>
+          <button onClick={() => addBox('redaction')}><Minus size={14} /> Redact</button>
+          <button disabled={!selectedIds.length} onClick={removeSelected}><Trash2 size={14} /> Delete</button>
+          <span className="pro-toolbar-spacer" />
+          <IconButton label="Previous page" disabled={page <= 1} onClick={() => setPage(value => value - 1)}><ArrowLeft size={15} /></IconButton><b>Page {page} / {item.pages}</b><IconButton label="Next page" disabled={page >= item.pages} onClick={() => setPage(value => value + 1)}><ArrowRight size={15} /></IconButton>
+          <span className="pro-toolbar-spacer" /><ZoomOut size={14} /><input aria-label="Editor zoom" type="range" min="0.55" max="2.4" step="0.05" value={zoom} onChange={event => setZoom(Number(event.target.value))} /><ZoomIn size={14} /><b>{Math.round(zoom * 100)}%</b>
+        </div>
+        <div className="pro-page-scroll" onClick={event => event.target === event.currentTarget && setSelectedIds([])}>
+          <div className="pro-page-wrap"><canvas ref={canvasRef} />
+            <div className="pro-object-layer">{items.map(entry => {
+              const isSelected = selectedIds.includes(entry.id), objectTop = pageInfo.height - entry.pdfY * scale - entry.pdfHeight * scale;
+              if (entry.type === 'image') return <button key={entry.id} className={`pro-image-object ${isSelected ? 'selected' : ''}`} style={{ left: entry.pdfX * scale, top: objectTop, width: entry.pdfWidth * scale, height: entry.pdfHeight * scale, opacity: entry.opacity / 100, transform: `rotate(${entry.rotation || 0}deg)` }} onPointerDown={event => beginDrag(entry, event)}><img src={entry.dataUrl} alt="Added PDF object" /></button>;
+              if (entry.type !== 'text') return <button key={entry.id} className={`pro-box-object ${entry.type} ${isSelected ? 'selected' : ''}`} style={{ left: entry.pdfX * scale, top: objectTop, width: entry.pdfWidth * scale, height: entry.pdfHeight * scale, opacity: entry.opacity / 100, background: entry.background, border: `${entry.borderWidth || 0}px solid ${entry.color}` }} onPointerDown={event => beginDrag(entry, event)} title={entry.type} />;
+              const style = { left: entry.pdfX * scale, top: pageInfo.height - entry.pdfY * scale - entry.size * scale, width: Math.max(entry.pdfWidth * scale, 28), height: Math.max(entry.pdfHeight * scale * 1.2, 14), fontFamily: entry.font === 'Times' ? 'Georgia,serif' : entry.font === 'Courier' ? 'monospace' : 'Arial,sans-serif', fontSize: entry.size * scale, fontWeight: entry.bold ? 700 : 400, fontStyle: entry.italic ? 'italic' : 'normal', color: entry.color, textAlign: entry.align, opacity: entry.opacity / 100 };
+              return isSelected ? <textarea key={entry.id} autoFocus={selectedIds.length === 1} value={entry.text} style={style} onClick={event => event.stopPropagation()} onChange={event => updateSelected({ text: event.target.value })} /> : <button key={entry.id} className={`${entry.changed ? 'changed' : ''} ${entry.source === 'ocr' && entry.confidence < 70 ? 'uncertain' : ''}`} style={style} title={`${entry.source} text${entry.confidence !== undefined ? ` · ${entry.confidence}% confidence` : ''}`} onPointerDown={event => beginDrag(entry, event)}>{entry.changed ? entry.text : ''}</button>;
+            })}</div>{rendering && <div className="visual-loading"><LoaderCircle className="spin" size={22} /> Analyzing page</div>}</div>
+        </div>
+        <div className="pro-status"><span>{pageInfo.nativeText ? `${pageInfo.nativeText} editable text regions detected` : 'Image-only or no native text detected'}</span><span>{selectedIds.length ? `${selectedIds.length} selected` : `${allTextCount} regions analyzed`} · Files stay on this device</span></div>
+      </main>
+      <aside className="pro-properties">
+        <div className="pro-property-tabs"><button className={rightPanel === 'format' ? 'active' : ''} onClick={() => setRightPanel('format')}>Format</button><button className={rightPanel === 'find' ? 'active' : ''} onClick={() => setRightPanel('find')}>Find</button><button className={rightPanel === 'ocr' ? 'active' : ''} onClick={() => setRightPanel('ocr')}>OCR</button><button className={rightPanel === 'document' ? 'active' : ''} onClick={() => setRightPanel('document')}>Document</button></div>
+        {rightPanel === 'format' && (selected ? <div className="pro-property-body">
+          <small>{selected.type === 'text' ? 'TEXT PROPERTIES' : `${selected.type.toUpperCase()} PROPERTIES`}</small>
+          {selected.type === 'text' && <><label>Font family<select value={selected.font} onChange={event => updateSelected({ font: event.target.value })}>{Object.keys(proFonts).map(font => <option key={font}>{font}</option>)}</select></label><div className="pro-field-row"><label>Size<input type="number" min="5" max="144" value={Math.round(selected.size)} onChange={event => updateSelected({ size: Number(event.target.value), pdfHeight: Number(event.target.value) })} /></label><label>Opacity<input type="number" min="10" max="100" value={selected.opacity} onChange={event => updateSelected({ opacity: Number(event.target.value) })} /></label></div><div className="pro-format-buttons"><button className={selected.bold ? 'active' : ''} onClick={() => updateSelected({ bold: !selected.bold })}><b>B</b></button><button className={selected.italic ? 'active' : ''} onClick={() => updateSelected({ italic: !selected.italic })}><i>I</i></button>{['left','center','right'].map(value => <button key={value} className={selected.align === value ? 'active' : ''} onClick={() => updateSelected({ align: value })}>{value[0].toUpperCase()}</button>)}</div><div className="pro-field-row"><label>Text colour<input type="color" value={selected.color} onChange={event => updateSelected({ color: event.target.value })} /></label><label>Background<input type="color" value={selected.background} onChange={event => updateSelected({ background: event.target.value })} /></label></div></>}
+          {selected.type !== 'text' && <><div className="pro-field-row">{selected.type !== 'image' && <label>Fill<input type="color" value={selected.background} onChange={event => updateSelected({ background: event.target.value })} /></label>}<label>Opacity<input type="number" min="5" max="100" value={selected.opacity} onChange={event => updateSelected({ opacity: Number(event.target.value) })} /></label></div>{selected.type === 'shape' && <div className="pro-field-row"><label>Border<input type="color" value={selected.color} onChange={event => updateSelected({ color: event.target.value })} /></label><label>Border width<input type="number" min="0" max="20" value={selected.borderWidth} onChange={event => updateSelected({ borderWidth: Number(event.target.value) })} /></label></div>}{selected.type === 'image' && <label>Rotation<input type="number" min="-360" max="360" value={selected.rotation} onChange={event => updateSelected({ rotation: Number(event.target.value) })} /></label>}{selected.type === 'redaction' && <p className="pro-warning">Exported redactions are flattened opaque marks. For highly sensitive documents, verify the result before distribution.</p>}</>}
+          <small>POSITION & BOX</small><div className="pro-field-row"><label>X<input type="number" value={Math.round(selected.pdfX)} onChange={event => updateSelected({ pdfX: Number(event.target.value) })} /></label><label>Y<input type="number" value={Math.round(selected.pdfY)} onChange={event => updateSelected({ pdfY: Number(event.target.value) })} /></label></div><div className="pro-field-row"><label>Width<input type="number" min="10" value={Math.round(selected.pdfWidth)} onChange={event => updateSelected({ pdfWidth: Number(event.target.value) })} /></label><label>Height<input type="number" min="6" value={Math.round(selected.pdfHeight)} onChange={event => updateSelected({ pdfHeight: Number(event.target.value) })} /></label></div>
+          {selected.type === 'text' && <button className="secondary full" onClick={() => updateSelected({ text: selected.originalText, changed: false })}><RefreshCcw size={14} /> Restore original</button>}<button className="secondary full danger-text" onClick={removeSelected}><Trash2 size={14} /> Delete selected</button>
+        </div> : <div className="pro-empty-property"><Settings2 size={22} /><strong>Select an object on the page</strong><p>Click text, images, shapes, highlights or redaction marks to edit their properties.</p></div>)}
+        {rightPanel === 'find' && <div className="pro-property-body"><small>DOCUMENT FIND & REPLACE</small><label>Find<input value={findText} onChange={event => setFindText(event.target.value)} placeholder="Text to find" /></label><label>Replace with<input value={replaceText} onChange={event => setReplaceText(event.target.value)} placeholder="Replacement" /></label><button className="primary full" disabled={!findText} onClick={replaceAll}><RefreshCcw size={14} /> Replace across analyzed pages</button><p className="pro-note">Visit pages using the thumbnail rail first to analyze them before document-wide replacement.</p></div>}
+        {rightPanel === 'ocr' && <div className="pro-property-body"><small>SCAN RECOGNITION</small><p className="pro-note">Use OCR for scanned or photographed pages. It replaces the current editable overlay with recognized text regions.</p><label>Document language<select value={ocrLanguage} onChange={event => setOcrLanguage(event.target.value)}><option value="eng">English</option><option value="hin">Hindi</option><option value="ori">Odia</option><option value="ben">Bengali</option></select></label><button className="primary full" disabled={ocrProgress !== null || rendering} onClick={runOcr}>{ocrProgress !== null ? <><LoaderCircle className="spin" size={14} /> Recognizing {ocrProgress}%</> : <><FileText size={14} /> Recognize current page</>}</button><div className="pro-ocr-legend"><span><i className="good" /> 70–100% confidence</span><span><i className="low" /> Review uncertain text</span></div></div>}
+        {rightPanel === 'document' && <div className="pro-property-body"><small>DOCUMENT-WIDE TOOLS</small><label>Watermark text<input value={watermark} onChange={event => setWatermark(event.target.value)} placeholder="Optional watermark" /></label><label className="pro-check"><input type="checkbox" checked={pageNumbers} onChange={event => setPageNumbers(event.target.checked)} /> Add page numbers during export</label><p className="pro-note">Watermarks and page numbers are applied to every page without changing the original document until export.</p><small>AVAILABLE IN PDF SUITE</small><p className="pro-note">Use Organize PDF for reordering, rotation, duplication and deletion. Use Annotate & Sign for drawing, stamps and signatures. Those tools share the same private local-processing model.</p></div>}
+      </aside>
+    </div>
+  </div>;
 }
 
 function PdfWorkspace() {
