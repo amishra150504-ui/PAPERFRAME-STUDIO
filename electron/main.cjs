@@ -99,12 +99,16 @@ async function createWindow(initialPdf) {
     const { root } = await window.webContents.debugger.sendCommand('DOM.getDocument');
     const { nodeId } = await window.webContents.debugger.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file][accept*=".pdf"]' });
     await window.webContents.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: [process.env.PAPERFRAME_TEST_PDF] });
-    await pause(8000);
-    const bodyText = await window.webContents.executeJavaScript('document.body.innerText');
-    const screenshot = await window.webContents.capturePage();
-    const screenshotPath = path.join(__dirname, '..', 'desktop-pdf-test.png');
-    fs.writeFileSync(screenshotPath, screenshot.toPNG());
-    log(`Automated PDF test: rendered=${!bodyText.includes('could not be rendered')} screenshot=${screenshotPath}`);
+    await pause(3000);
+    const pageCount = await window.webContents.executeJavaScript(`document.querySelectorAll('.pro-thumb').length`);
+    const failedPages = [];
+    for (let pageNumber = 1; pageNumber <= pageCount; pageNumber += 1) {
+      await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('.pro-thumb')).find(button => button.textContent.trim() === '${pageNumber}')?.click()`);
+      await pause(700);
+      const bodyText = await window.webContents.executeJavaScript('document.body.innerText');
+      if (bodyText.includes('could not be rendered')) failedPages.push(pageNumber);
+    }
+    log(`Automated PDF test: rendered=${failedPages.length === 0} pages=${pageCount} failedPages=${failedPages.join(',') || 'none'}`);
     window.webContents.debugger.detach();
   }
 }
