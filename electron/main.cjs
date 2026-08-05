@@ -20,6 +20,7 @@ const mimeTypes = {
 };
 
 let localServer;
+let mainWindow;
 
 function siteRoot() {
   return app.isPackaged
@@ -55,7 +56,22 @@ function startLocalServer() {
   });
 }
 
-async function createWindow() {
+async function openPdfInEditor(window, filePath) {
+  if (!filePath || !/\.pdf$/i.test(filePath) || !fs.existsSync(filePath)) return;
+  app.addRecentDocument(filePath);
+  await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('PDF tools'))?.click()`);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('Edit PDF'))?.click()`);
+  await new Promise(resolve => setTimeout(resolve, 250));
+  if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach('1.3');
+  const { root } = await window.webContents.debugger.sendCommand('DOM.getDocument');
+  const { nodeId } = await window.webContents.debugger.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file][accept*=".pdf"]' });
+  await window.webContents.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: [filePath] });
+  window.webContents.debugger.detach();
+  log(`Opened associated PDF: ${filePath}`);
+}
+
+async function createWindow(initialPdf) {
   log(`Starting window; packaged=${app.isPackaged}; resources=${process.resourcesPath}; siteRoot=${siteRoot()}`);
   const port = await startLocalServer();
   log(`Local server listening on 127.0.0.1:${port}`);
@@ -65,15 +81,40 @@ async function createWindow() {
     icon: path.join(siteRoot(), 'assets', 'paperframe-icon-192.png'),
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true }
   });
+  mainWindow = window;
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (/^https?:/i.test(url)) shell.openExternal(url);
     return { action: 'deny' };
   });
   await window.loadURL(`http://127.0.0.1:${port}/`);
   log('Window loaded successfully');
+  if (initialPdf) await openPdfInEditor(window, initialPdf);
+  if (process.env.PAPERFRAME_TEST_PDF) {
+    const pause = delay => new Promise(resolve => setTimeout(resolve, delay));
+    await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('PDF tools'))?.click()`);
+    await pause(300);
+    await window.webContents.executeJavaScript(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('Edit PDF'))?.click()`);
+    await pause(300);
+    window.webContents.debugger.attach('1.3');
+    const { root } = await window.webContents.debugger.sendCommand('DOM.getDocument');
+    const { nodeId } = await window.webContents.debugger.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file][accept*=".pdf"]' });
+    await window.webContents.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: [process.env.PAPERFRAME_TEST_PDF] });
+    await pause(8000);
+    const bodyText = await window.webContents.executeJavaScript('document.body.innerText');
+    const screenshot = await window.webContents.capturePage();
+    const screenshotPath = path.join(__dirname, '..', 'desktop-pdf-test.png');
+    fs.writeFileSync(screenshotPath, screenshot.toPNG());
+    log(`Automated PDF test: rendered=${!bodyText.includes('could not be rendered')} screenshot=${screenshotPath}`);
+    window.webContents.debugger.detach();
+  }
 }
 
-app.whenReady().then(createWindow).catch(error => { log(`startup failure: ${error.stack || error}`); app.quit(); });
+const singleInstance = app.requestSingleInstanceLock();
+if (!singleInstance) app.quit();
+else app.on('second-instance', (_event, argv) => {
+  if (mainWindow) { if (mainWindow.isMinimized()) mainWindow.restore(); mainWindow.focus(); openPdfInEditor(mainWindow, argv.find(argument => /\.pdf$/i.test(argument))); }
+});
+app.whenReady().then(() => createWindow(process.argv.find(argument => /\.pdf$/i.test(argument)))).catch(error => { log(`startup failure: ${error.stack || error}`); app.quit(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
 app.on('before-quit', () => { if (localServer) localServer.close(); });
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { PDFDocument, StandardFonts, degrees } from 'pdf-lib';
+import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 const source = await PDFDocument.create();
 const font = await source.embedFont(StandardFonts.Helvetica);
@@ -21,5 +22,15 @@ const checked = await PDFDocument.load(organizedBytes);
 assert.equal(checked.getPageCount(), 3, 'Organizer should support reorder and duplicate');
 assert.equal(checked.getPage(0).getRotation().angle, 90, 'Organizer rotation should persist');
 assert.ok(organizedBytes.length > 500, 'Output PDF should contain document data');
+
+const renderTask = pdfjs.getDocument({ data: sourceBytes.slice(), stopAtErrors: false, isEvalSupported: false, useWorkerFetch: false });
+const rendered = await renderTask.promise;
+const renderedPage = await rendered.getPage(1);
+const viewport = renderedPage.getViewport({ scale: 1.15 });
+const content = await renderedPage.getTextContent();
+assert.equal(rendered.numPages, 2, 'PDF.js should share and inspect the complete document');
+assert.ok(viewport.width > 500 && viewport.height > 700, 'PDF.js should calculate a usable page viewport');
+assert.ok(content.items.some(item => item.str.includes('Paperframe smoke test')), 'PDF.js should extract native text');
+await rendered.destroy();
 
 console.log('Paperframe smoke tests passed');

@@ -12,11 +12,12 @@
     "build": "vite build && node scripts/generate-seo.mjs",
     "desktop:dev": "electron .",
     "desktop:icon": "node scripts/create-desktop-icon.mjs",
-    "desktop:build": "npm run desktop:icon && npm run build && electron-builder --win portable",
+    "desktop:build": "npm run desktop:icon && npm run build && electron-builder --win nsis portable",
     "preview": "vite preview",
     "test": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
+    "@pdf-lib/fontkit": "^1.1.1",
     "@vitejs/plugin-react": "^4.3.4",
     "jspdf": "^4.2.1",
     "lucide-react": "^0.468.0",
@@ -36,13 +37,39 @@
     "appId": "studio.paperframe.desktop",
     "productName": "Paperframe Studio",
     "asar": true,
-    "directories": { "output": "release", "buildResources": "build" },
-    "files": ["electron/**/*", "package.json"],
-    "extraResources": [{ "from": "dist", "to": "app-dist" }],
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "dist",
+        "to": "app-dist"
+      }
+    ],
     "win": {
-      "target": "portable",
+      "target": ["nsis", "portable"],
       "icon": "build/paperframe.ico",
       "artifactName": "Paperframe-Studio-${version}-Portable.${ext}"
-    }
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "shortcutName": "Paperframe Studio",
+      "artifactName": "Paperframe-Studio-Setup-${version}.${ext}"
+    },
+    "fileAssociations": [{
+      "ext": "pdf",
+      "name": "PDF Document",
+      "description": "Open and edit PDF documents with Paperframe Studio",
+      "role": "Editor",
+      "icon": "build/paperframe.ico"
+    }]
   }
 }
