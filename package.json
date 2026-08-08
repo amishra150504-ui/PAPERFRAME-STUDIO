@@ -19,16 +19,18 @@
   "dependencies": {
     "@pdf-lib/fontkit": "^1.1.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "docx": "^9.7.1",
     "jspdf": "^4.2.1",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.468.0",
     "pdf-lib": "^1.17.1",
-    "pdfjs-dist": "^5.4.624",
+    "pdfjs-dist": "^6.2.108",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tesseract.js": "^6.0.1"
   },
   "devDependencies": {
-    "electron": "^37.2.4",
+    "electron": "^42.8.1",
     "electron-builder": "^26.0.12",
     "png-to-ico": "^3.0.1",
     "vite": "^6.0.5"
@@ -52,7 +54,10 @@
       }
     ],
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        "nsis",
+        "portable"
+      ],
       "icon": "build/paperframe.ico",
       "artifactName": "Paperframe-Studio-${version}-Portable.${ext}"
     },
@@ -64,12 +69,14 @@
       "shortcutName": "Paperframe Studio",
       "artifactName": "Paperframe-Studio-Setup-${version}.${ext}"
     },
-    "fileAssociations": [{
-      "ext": "pdf",
-      "name": "PDF Document",
-      "description": "Open and edit PDF documents with Paperframe Studio",
-      "role": "Editor",
-      "icon": "build/paperframe.ico"
-    }]
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "PDF Document",
+        "description": "Open and edit PDF documents with Paperframe Studio",
+        "role": "Editor",
+        "icon": "build/paperframe.ico"
+      }
+    ]
   }
 }

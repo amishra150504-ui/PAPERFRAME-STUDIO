@@ -15,6 +15,7 @@ import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import './styles.css';
 import { clearAutosave, loadAutosave, saveAutosave } from './projectStore';
+import { convertPdf, countSelectedPages, downloadOutputs } from './pdfConverters';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -930,8 +931,16 @@ function AnnotateTool({ notify }) {
 function PenToolIcon() { return <Move size={24} />; }
 
 function ConvertTool({ notify }) {
-  const [mode, setMode] = useState('images'), [busy, setBusy] = useState(false);
+  const [mode, setMode] = useState('word'), [busy, setBusy] = useState(false), [files, setFiles] = useState([]);
+  const [range, setRange] = useState('all'), [ocrScans, setOcrScans] = useState(false), [pngScale, setPngScale] = useState(2);
+  const [progress, setProgress] = useState({ done: 0, total: 0, label: '' });
   const imageRef = useRef(), pdfRef = useRef();
+  const addPdfs = incoming => {
+    const added = [...incoming].filter(file => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))
+      .map(file => ({ id: crypto.randomUUID(), file, name: file.name, size: file.size, status: 'Ready' }));
+    setFiles(current => [...current, ...added]);
+    if (added.length) notify(`${added.length} PDF${added.length > 1 ? 's' : ''} added to conversion queue`);
+  };
   const imagesToPdf = async files => {
     if (!files.length) return; setBusy(true);
     try {
@@ -944,24 +953,48 @@ function ConvertTool({ notify }) {
       savePdf(await doc.save({ useObjectStreams: true }), 'paperframe-images.pdf'); notify(`${files.length} images converted to PDF`);
     } catch { notify('Could not convert these images'); } setBusy(false);
   };
-  const pdfToImages = async files => {
-    if (!files.length) return; setBusy(true);
+  const convertBatch = async () => {
+    if (!files.length) return notify('Add at least one PDF'); setBusy(true);
+    const workerRef = { current: null }, outputs = [];
     try {
-      const bytes = new Uint8Array(await files[0].arrayBuffer()), loading = pdfjsLib.getDocument({ data: bytes }), pdf = await loading.promise;
-      for (let number = 1; number <= pdf.numPages; number++) {
-        const page = await pdf.getPage(number), viewport = page.getViewport({ scale: 2 }), canvas = document.createElement('canvas');
-        canvas.width = viewport.width; canvas.height = viewport.height;
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
-        const blob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
-        const url = URL.createObjectURL(blob), link = document.createElement('a'); link.href = url; link.download = `page-${number}.png`; link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1200);
+      const counts = await Promise.all(files.map(entry => countSelectedPages(entry.file, range))), total = counts.reduce((sum, count) => sum + count, 0);
+      if (!total) throw Error('The selected page range is empty');
+      setProgress({ done: 0, total, label: 'Preparing conversion' });
+      if (ocrScans && mode !== 'png') { const { createWorker } = await import('tesseract.js'); workerRef.current = await createWorker('eng'); }
+      for (const queued of files) {
+        setFiles(current => current.map(entry => entry.id === queued.id ? { ...entry, status: 'Converting…' } : entry));
+        const converted = await convertPdf(queued.file, mode, {
+          range, ocr: ocrScans, pngScale, worker: workerRef.current,
+          onPage: pageNumber => setProgress(current => ({ ...current, done: current.done + 1, label: `${queued.name} · page ${pageNumber}` }))
+        });
+        converted.forEach(output => {
+          let name = output.name, suffix = 2;
+          while (outputs.some(existing => existing.name.toLowerCase() === name.toLowerCase())) {
+            name = output.name.includes('/') ? output.name.replace('/', ` (${suffix})/`) : output.name.replace(/(\.[^.]+)$/, ` (${suffix})$1`); suffix++;
+          }
+          outputs.push({ ...output, name });
+        });
+        setFiles(current => current.map(entry => entry.id === queued.id ? { ...entry, status: 'Complete' } : entry));
       }
-      await loading.destroy(); notify(`${pdf.numPages} page images created`);
-    } catch { notify('Could not convert this PDF'); } setBusy(false);
+      if (workerRef.current) await workerRef.current.terminate(); await downloadOutputs(outputs, mode);
+      notify(`${files.length} PDF${files.length > 1 ? 's' : ''} converted successfully`);
+    } catch (error) {
+      console.error(error); if (workerRef.current) await workerRef.current.terminate(); notify(error?.message || 'Conversion failed');
+      setFiles(current => current.map(entry => entry.status === 'Converting…' ? { ...entry, status: 'Failed' } : entry));
+    }
+    setBusy(false);
   };
-  return <div className="convert-workarea"><div className="edit-kind"><button className={mode === 'images' ? 'selected' : ''} onClick={() => setMode('images')}>Images to PDF</button><button className={mode === 'pdf' ? 'selected' : ''} onClick={() => setMode('pdf')}>PDF to PNG</button></div>
-    {mode === 'images' ? <><input ref={imageRef} hidden type="file" multiple accept="image/png,image/jpeg" onChange={event => imagesToPdf(event.target.files)} /><button className="pdf-drop" disabled={busy} onClick={() => imageRef.current.click()}><div>{busy ? <LoaderCircle className="spin" size={24} /> : <ImageIcon size={24} />}</div><strong>Choose PNG or JPEG images</strong><span>One centered A4 page will be created per image</span></button></>
-      : <><input ref={pdfRef} hidden type="file" accept=".pdf,application/pdf" onChange={event => pdfToImages(event.target.files)} /><button className="pdf-drop" disabled={busy} onClick={() => pdfRef.current.click()}><div>{busy ? <LoaderCircle className="spin" size={24} /> : <FileText size={24} />}</div><strong>Choose one PDF</strong><span>Each page will download as a high-resolution PNG</span></button></>}
+  const totalMb = files.reduce((sum, entry) => sum + entry.size, 0) / 1048576;
+  return <div className="convert-workarea batch-converter"><div className="edit-kind four"><button className={mode === 'word' ? 'selected' : ''} onClick={() => setMode('word')}>PDF to Word</button><button className={mode === 'excel' ? 'selected' : ''} onClick={() => setMode('excel')}>PDF to Excel</button><button className={mode === 'png' ? 'selected' : ''} onClick={() => setMode('png')}>PDF to PNG</button><button className={mode === 'images' ? 'selected' : ''} onClick={() => setMode('images')}>Images to PDF</button></div>
+    {mode === 'images' ? <><input ref={imageRef} hidden type="file" multiple accept="image/png,image/jpeg" onChange={event => imagesToPdf(event.target.files)} /><button className="pdf-drop" disabled={busy} onClick={() => imageRef.current.click()}><div>{busy ? <LoaderCircle className="spin" size={24} /> : <ImageIcon size={24} />}</div><strong>Choose multiple PNG or JPEG images</strong><span>One centered A4 page will be created per image</span></button></> : <>
+      <input ref={pdfRef} hidden type="file" multiple accept=".pdf,application/pdf" onChange={event => { addPdfs(event.target.files); event.target.value = ''; }} />
+      <button className="pdf-drop batch-drop" disabled={busy} onClick={() => pdfRef.current.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addPdfs(event.dataTransfer.files); }}><div><FilePlus2 size={24} /></div><strong>Add PDFs for batch conversion</strong><span>Choose any number of files · processed privately on this device</span></button>
+      {files.length > 0 && <><div className="convert-queue-head"><span><strong>{files.length} PDF{files.length > 1 ? 's' : ''}</strong><small>{totalMb < 1 ? 'Under 1 MB' : `${totalMb.toFixed(1)} MB total`}</small></span><button className="text-button danger-text" disabled={busy} onClick={() => setFiles([])}><Trash2 size={13} /> Clear</button></div>
+        <div className="convert-queue">{files.map(entry => <div className="convert-file" key={entry.id}><FileText size={19} /><span><strong>{entry.name}</strong><small>{(entry.size / 1048576).toFixed(2)} MB</small></span><em className={entry.status.toLowerCase().replace('…', '')}>{entry.status}</em><IconButton label="Remove file" disabled={busy} onClick={() => setFiles(current => current.filter(file => file.id !== entry.id))}><X size={14} /></IconButton></div>)}</div>
+        <div className="convert-settings"><label><span>Pages</span><input value={range} onChange={event => setRange(event.target.value)} placeholder="all or 1-3, 7" /></label>{mode === 'png' ? <label><span>PNG resolution</span><select value={pngScale} onChange={event => setPngScale(Number(event.target.value))}><option value="1.5">Standard · 108 DPI</option><option value="2">High · 144 DPI</option><option value="3">Print · 216 DPI</option><option value="4">Ultra · 288 DPI</option></select></label> : <label className="convert-check"><input type="checkbox" checked={ocrScans} onChange={event => setOcrScans(event.target.checked)} /><span><strong>OCR scanned pages</strong><small>Recognize image-only text in English</small></span></label>}</div>
+        {busy && <div className="convert-progress"><span><b style={{ width: `${progress.total ? progress.done / progress.total * 100 : 0}%` }} /></span><small>{progress.label} · {progress.done}/{progress.total} pages</small></div>}
+        <button className="primary tool-main-action" disabled={busy} onClick={convertBatch}>{busy ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} {busy ? 'Converting locally…' : `Convert ${files.length} PDF${files.length > 1 ? 's' : ''} to ${mode.toUpperCase()}`}</button></>}
+    </>}
   </div>;
 }
 
@@ -1273,6 +1306,15 @@ function EditTool({ notify }) {
   };
 
   useEffect(() => {
+    const openDesktopPdf = event => {
+      const { name, bytes } = event.detail || {}; if (!name || !bytes) return;
+      load([new File([bytes], name, { type: 'application/pdf' })]);
+    };
+    window.addEventListener('paperframe-open-pdf', openDesktopPdf);
+    return () => window.removeEventListener('paperframe-open-pdf', openDesktopPdf);
+  }, []);
+
+  useEffect(() => {
     if (!item || !Object.keys(pageItems).length) return;
     const timer = setTimeout(() => {
       try { localStorage.setItem(`paperframe-pdf-session:${item.name}`, JSON.stringify(pageItems)); } catch {}
@@ -1293,7 +1335,7 @@ function EditTool({ notify }) {
 
   useEffect(() => {
     if (!item) return;
-    let cancelled = false;
+    let cancelled = false, renderTask;
     (async () => {
       setRendering(true); setSelectedIds([]);
       try {
@@ -1303,7 +1345,8 @@ function EditTool({ notify }) {
         const ratio = Math.min(window.devicePixelRatio || 1, 2), context = canvas.getContext('2d');
         canvas.width = Math.floor(viewport.width * ratio); canvas.height = Math.floor(viewport.height * ratio);
         canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`;
-        await pdfPage.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] }).promise;
+        renderTask = pdfPage.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] });
+        await renderTask.promise;
         const content = await pdfPage.getTextContent(), fragments = content.items.filter(entry => entry.str?.trim()).map((entry, index) => {
           const transformed = pdfjsLib.Util.transform(viewport.transform, entry.transform);
           const fontHeight = Math.max(6, Math.hypot(transformed[2], transformed[3]));
@@ -1329,10 +1372,10 @@ function EditTool({ notify }) {
           setPageInfo({ width: viewport.width, height: viewport.height, nativeText: merged.length });
           setPageItems(current => current[page] ? current : { ...current, [page]: merged });
         }
-      } catch (error) { console.error('PDF page render failed', error); if (!cancelled) notify(`Page ${page} could not be rendered: ${error?.message || 'unknown PDF error'}`); }
+      } catch (error) { if (error?.name !== 'RenderingCancelledException') console.error('PDF page render failed', error); if (!cancelled && error?.name !== 'RenderingCancelledException') notify(`Page ${page} could not be rendered: ${error?.message || 'unknown PDF error'}`); }
       if (!cancelled) setRendering(false);
     })();
-    return () => { cancelled = true; };
+    return () => { cancelled = true; renderTask?.cancel(); };
   }, [item, page, scale]);
 
   const snapshot = () => JSON.parse(JSON.stringify(pageItems));
@@ -1619,13 +1662,17 @@ function EditTool({ notify }) {
 function PdfWorkspace() {
   const [active, setActive] = useState('merge'), [toast, setToast] = useState('');
   const notify = message => { setToast(message); setTimeout(() => setToast(''), 2600); };
+  useEffect(() => window.paperframeDesktop?.onOpenPdf?.(payload => {
+    setActive('edit');
+    setTimeout(() => window.dispatchEvent(new CustomEvent('paperframe-open-pdf', { detail: payload })), 100);
+  }), []);
   const definitions = [
     ['merge', 'Merge PDF', 'Combine PDFs in the order you want.', <Layers3 size={25} />, 'coral'],
     ['organize', 'Organize PDF', 'Reorder, rotate, duplicate, and delete pages.', <Grid2X2 size={25} />, 'blue'],
     ['split', 'Split PDF', 'Extract ranges or individual pages.', <Scissors size={25} />, 'orange'],
     ['compress', 'Compress PDF', 'Optimize size without visible quality loss.', <Maximize2 size={25} />, 'green'],
     ['annotate', 'Annotate & Sign', 'Draw, highlight, redact, stamp, and sign.', <Move size={25} />, 'teal'],
-    ['convert', 'Convert', 'Images to PDF or PDF pages to PNG.', <RefreshCcw size={25} />, 'gold'],
+    ['convert', 'Convert', 'Batch PDF to Word, Excel or PNG — plus images to PDF.', <RefreshCcw size={25} />, 'gold'],
     ['compare', 'Compare PDF', 'Find page and text differences locally.', <Copy size={25} />, 'navy'],
     ['edit', 'Edit PDF', 'Add text, images, or shapes.', <Settings2 size={25} />, 'purple']
   ];
