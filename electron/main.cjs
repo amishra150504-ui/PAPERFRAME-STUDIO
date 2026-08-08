@@ -111,6 +111,28 @@ async function createWindow(initialPdf) {
     log(`Automated PDF test: rendered=${failedPages.length === 0} pages=${pageCount} failedPages=${failedPages.join(',') || 'none'}`);
     window.webContents.debugger.detach();
   }
+  if (process.env.PAPERFRAME_TEST_PHOTOS) {
+    const pause = delay => new Promise(resolve => setTimeout(resolve, delay));
+    if (!window.webContents.debugger.isAttached()) window.webContents.debugger.attach('1.3');
+    const { root } = await window.webContents.debugger.sendCommand('DOM.getDocument');
+    const { nodeId } = await window.webContents.debugger.sendCommand('DOM.querySelector', { nodeId: root.nodeId, selector: 'input[type=file][accept="image/*"]' });
+    await window.webContents.debugger.sendCommand('DOM.setFileInputFiles', { nodeId, files: Array(16).fill(process.env.PAPERFRAME_TEST_PHOTOS) });
+    await pause(2500);
+    const screenResult = await window.webContents.executeJavaScript(`({
+      photos: document.querySelectorAll('.asset').length,
+      sheets: document.querySelectorAll('.print-sheet').length,
+      cells: document.querySelectorAll('.print-sheet .photo-cell img').length,
+      button: Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('Print all'))?.textContent.trim()
+    })`);
+    await window.webContents.debugger.sendCommand('Emulation.setEmulatedMedia', { media: 'print' });
+    const printResult = await window.webContents.executeJavaScript(`({
+      display: getComputedStyle(document.querySelector('.print-pages')).display,
+      visibleSheets: Array.from(document.querySelectorAll('.print-sheet')).filter(sheet => getComputedStyle(sheet).visibility === 'visible').length,
+      pageBreaks: Array.from(document.querySelectorAll('.print-sheet')).slice(0, -1).every(sheet => ['page', 'always'].includes(getComputedStyle(sheet).breakAfter) || getComputedStyle(sheet).pageBreakAfter === 'always')
+    })`);
+    log(`Automated photo print test: ${JSON.stringify({ ...screenResult, ...printResult })}`);
+    window.webContents.debugger.detach();
+  }
 }
 
 const singleInstance = app.requestSingleInstanceLock();

@@ -328,6 +328,13 @@ function PhotoWorkspace() {
     flash('Format copied — click a photo to apply');
   };
 
+  const printAllPages = () => {
+    if (!photos.length) return flash('Add at least one photo first');
+    setShowPreflight(false);
+    flash(`Preparing ${pages} A4 page${pages > 1 ? 's' : ''} for printing`);
+    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+  };
+
   const imageData = photo => new Promise(resolve => {
     const canvas = document.createElement('canvas');
     const img = new Image();
@@ -420,7 +427,7 @@ function PhotoWorkspace() {
           <button className={`preflight-button ${preflightIssues.some(issue => issue.level === 'error') ? 'has-error' : preflightIssues.length ? 'has-warning' : 'ready'}`} onClick={() => setShowPreflight(value => !value)}>
             {preflightIssues.length ? preflightIssues.length : <Check size={13} />} Preflight
           </button>
-          <button className="secondary" onClick={() => window.print()}><Printer size={16} /> Print {settings.orientation === 'portrait' ? 'portrait' : 'landscape'}</button>
+          <button className="secondary" onClick={printAllPages}><Printer size={16} /> Print all {pages} page{pages > 1 ? 's' : ''}</button>
           <button className="primary" onClick={exportPdf} disabled={exporting}>
             {exporting ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} Export PDF</button>
         </div>
@@ -454,6 +461,24 @@ function PhotoWorkspace() {
           </div>
           <div className="page-label">A4 · {settings.orientation === 'portrait' ? '210 × 297' : '297 × 210'} mm</div>
         </div>
+      </div>
+      <div className="print-pages" aria-hidden="true">
+        {Array.from({ length: pages }).map((_, printPage) => {
+          const printPhotos = photos.slice(printPage * perPage, printPage * perPage + perPage);
+          return <div className={`a4-page print-sheet ${settings.orientation}`} key={printPage} style={{
+            padding: `${settings.marginTop}mm ${settings.marginRight}mm ${settings.marginBottom}mm ${settings.marginLeft}mm`,
+            background: settings.background
+          }}>
+            <div className="grid" style={{
+              gridTemplateColumns: settings.fixedSize ? `repeat(${effectiveCols}, ${settings.photoWidth}mm)` : `repeat(${effectiveCols}, 1fr)`,
+              gridTemplateRows: settings.fixedSize ? `repeat(${effectiveRows}, ${settings.photoHeight}mm)` : `repeat(${effectiveRows}, 1fr)`,
+              columnGap: `${settings.gapX}mm`, rowGap: `${settings.gapY}mm`
+            }}>
+              {Array.from({ length: perPage }).map((__, index) => <PhotoCell key={index} photo={printPhotos[index]} index={index}
+                settings={settings} selected={false} painterActive={false} onSelect={() => {}} onDropPhoto={() => {}} />)}
+            </div>
+          </div>;
+        })}
       </div>
       <div className="zoom-bar">
         <IconButton label="Zoom out" onClick={() => setZoom(z => Math.max(40, z - 10))}><Minus size={15} /></IconButton>
