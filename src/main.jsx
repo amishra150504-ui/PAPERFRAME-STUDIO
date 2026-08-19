@@ -465,6 +465,9 @@ function PhotoWorkspace() {
         onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); addFiles(e.dataTransfer.files); }}>
         <Upload size={18} /><span><strong>Add photos</strong><small>Drop images or browse</small></span>
       </button>
+      {photos.length > 0 && <div className="asset-select-row">
+        <button className="secondary compact" onClick={toggleSelectAllPhotos}><Check size={14} /> {allPhotosSelected ? 'Deselect all photos' : `Select all photos (${photos.length})`}</button>
+      </div>}
       <div className="asset-list" onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setAssetDropIndex(null); }} onDragOver={event => { event.preventDefault(); if (event.target === event.currentTarget) setAssetDropIndex(photos.length); }} onDrop={event => { event.preventDefault(); reorderPhoto(event.dataTransfer.getData('photoId'), assetDropIndex ?? photos.length); }}>
         {photos.map((p, i) => <button key={p.id} draggable onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('photoId', p.id); }} onDragEnd={() => setAssetDropIndex(null)}
           onDragOver={event => { event.preventDefault(); event.stopPropagation(); const box = event.currentTarget.getBoundingClientRect(); setAssetDropIndex(event.clientY < box.top + box.height / 2 ? i : i + 1); }}
@@ -475,7 +478,6 @@ function PhotoWorkspace() {
         {!photos.length && <div className="asset-empty"><Layers3 size={24} /><p>Your uploaded photos will appear here.</p></div>}
       </div>
       {photos.length > 0 && <div className="asset-delete-actions">
-        <button className="text-button" onClick={toggleSelectAllPhotos}><Check size={14} /> {allPhotosSelected ? 'Deselect all' : 'Select all'}</button>
         <button className="text-button danger-text" disabled={!selectedIds.length} onClick={removeSelected}><Trash2 size={14} /> Delete selected{selectedIds.length > 1 ? ` (${selectedIds.length})` : ''}</button>
         <button className="text-button danger-text" onClick={() => { checkpoint(); setPhotos([]); setSelectedIds([]); clearAutosave(); }}><Trash2 size={14} /> Clear all photos</button>
       </div>}
