@@ -1,4 +1,4 @@
-const { app, BrowserWindow, shell } = require('electron');
+const { app, BrowserWindow, shell, ipcMain } = require('electron');
 const http = require('node:http');
 const fs = require('node:fs');
 const path = require('node:path');
@@ -21,6 +21,19 @@ const mimeTypes = {
 
 let localServer;
 let mainWindow;
+const printPreviewFiles = new Set();
+
+ipcMain.handle('paperframe-open-print-preview', async (_event, bytes) => {
+  try {
+    const data = Buffer.from(bytes);
+    if (!data.length || data.length > 500 * 1024 * 1024) throw Error('Invalid print document');
+    const filePath = path.join(app.getPath('temp'), `paperframe-print-${Date.now()}.pdf`);
+    fs.writeFileSync(filePath, data); printPreviewFiles.add(filePath);
+    const error = await shell.openPath(filePath);
+    if (error) throw Error(error);
+    return { ok: true };
+  } catch (error) { log(`print preview failure: ${error.stack || error}`); return { ok: false, error: error.message }; }
+});
 
 function siteRoot() {
   return app.isPackaged
@@ -169,5 +182,8 @@ else app.on('second-instance', (_event, argv) => {
 });
 app.whenReady().then(() => createWindow(process.argv.find(argument => /\.pdf$/i.test(argument)))).catch(error => { log(`startup failure: ${error.stack || error}`); app.quit(); });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
-app.on('before-quit', () => { if (localServer) localServer.close(); });
+app.on('before-quit', () => {
+  if (localServer) localServer.close();
+  printPreviewFiles.forEach(filePath => { try { fs.unlinkSync(filePath); } catch {} });
+});
 app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });

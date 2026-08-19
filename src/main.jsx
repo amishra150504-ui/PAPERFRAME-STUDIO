@@ -6,16 +6,18 @@ import {
   Layers3, LoaderCircle, Maximize2, Minus, MoreHorizontal, Move, PanelLeftClose,
   Plus, Printer, Redo2, RefreshCcw, RotateCcw, RotateCw, Scissors, Settings2,
   Sparkles, Trash2, Undo2, Upload, X, ZoomIn, ZoomOut, Paintbrush, FlipHorizontal2,
-  FlipVertical2
+  FlipVertical2, Info
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
-import { PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
+import { PDFDocument, PDFName, StandardFonts, degrees, rgb } from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
 import pdfWorkerUrl from 'pdfjs-dist/legacy/build/pdf.worker.min.mjs?url';
 import './styles.css';
 import { clearAutosave, loadAutosave, saveAutosave } from './projectStore';
 import { convertPdf, countSelectedPages, downloadOutputs } from './pdfConverters';
+import { acceptedInput, convertInputToPdf } from './officeToPdf';
+import { fitImageRect, normalizedRotation, rotatedDimensions, smartExpandSettings } from './photoLayout';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
@@ -80,6 +82,7 @@ function EmptyCanvas({ onUpload }) {
 
 function PhotoCell({ photo, index, settings, selected, onSelect, onDropPhoto, painterActive }) {
   const [dragging, setDragging] = useState(false);
+  const rotation = normalizedRotation(photo?.rotation), quarterTurn = rotation === 90 || rotation === 270;
   return <button
     className={`photo-cell ${selected ? 'selected' : ''} ${dragging ? 'dragging' : ''}`}
     style={{
@@ -92,9 +95,13 @@ function PhotoCell({ photo, index, settings, selected, onSelect, onDropPhoto, pa
     onDrop={e => { e.preventDefault(); setDragging(false); onDropPhoto(e.dataTransfer.getData('photoId'), index); }}
   >
     {photo ? <>
-      <img src={photo.url} alt={photo.name} draggable={false} style={{
-        objectFit: photo.fit || settings.fit,
-        transform: `translate(${photo.x || 0}%, ${photo.y || 0}%) scale(${(photo.zoom || 1) * (photo.expandX || 1) * (photo.mirrorX ? -1 : 1)}, ${(photo.zoom || 1) * (photo.expandY || 1) * (photo.mirrorY ? -1 : 1)}) rotate(${photo.rotation || 0}deg)`,
+      {photo.fit === 'smart' && <img aria-hidden="true" src={photo.url} draggable={false} className={`smart-expand-background ${quarterTurn ? 'quarter-turn' : ''}`} style={{
+        objectFit: 'cover', transform: `${quarterTurn ? 'translate(-50%, -50%) ' : ''}rotate(${photo.rotation || 0}deg) scale(1.08)`,
+        filter: `blur(10px) brightness(${Math.max(55, (photo.brightness || 100) * .72)}%) contrast(${photo.contrast || 100}%) saturate(${photo.saturation || 100}%)`
+      }} />}
+      <img src={photo.url} alt={photo.name} draggable={false} className={`${photo.fit === 'smart' ? 'smart-expand-original' : ''} ${quarterTurn ? 'quarter-turn' : ''}`} style={{
+        objectFit: photo.fit === 'smart' ? 'contain' : (photo.fit || settings.fit),
+        transform: `${quarterTurn ? 'translate(-50%, -50%) ' : ''}translate(${photo.x || 0}%, ${photo.y || 0}%) scale(${(photo.zoom || 1) * (photo.expandX || 1) * (photo.mirrorX ? -1 : 1)}, ${(photo.zoom || 1) * (photo.expandY || 1) * (photo.mirrorY ? -1 : 1)}) rotate(${photo.rotation || 0}deg)`,
         filter: `brightness(${photo.brightness || 100}%) contrast(${photo.contrast || 100}%) saturate(${photo.saturation || 100}%)`
       }} />
       <span className="cell-number">{index + 1}</span>
@@ -103,7 +110,8 @@ function PhotoCell({ photo, index, settings, selected, onSelect, onDropPhoto, pa
   </button>;
 }
 
-function PhotoEditorPanel({ photo, selectedCount, onUpdate, onDelete, onDuplicate, onCopyFormat, painterActive }) {
+function PhotoEditorPanel({ photo, selectedCount, onUpdate, onDelete, onDuplicate, onCopyFormat, onSmartExpand, onSmartExpandAll, painterActive }) {
+  const [autoRotate, setAutoRotate] = useState(true);
   if (!photo) return <div className="selection-empty">
     <Crop size={22} />
     <strong>Select a photo</strong>
@@ -122,6 +130,7 @@ function PhotoEditorPanel({ photo, selectedCount, onUpdate, onDelete, onDuplicat
     <Segmented value={photo.fit} onChange={fit => onUpdate({ fit })} options={[
       { value: 'cover', label: 'Fill' }, { value: 'contain', label: 'Fit' }
     ]} />
+    <div className="smart-expand-card"><button className="primary smart-expand-button" onClick={() => onSmartExpand(autoRotate)}><Maximize2 size={15} /> Smart Expand {selectedCount > 1 ? `(${selectedCount})` : ''}</button><label><input type="checkbox" checked={autoRotate} onChange={event => setAutoRotate(event.target.checked)} /><span><strong>Allow auto-rotation</strong><small>Rotate 90° only when it fills the cell better</small></span></label><button className="text-button" onClick={() => onSmartExpandAll(autoRotate)}>Apply to all photos</button></div>
     {slider('Zoom', 'zoom', 1, 3, .05, v => `${Math.round(v * 100)}%`)}
     {slider('Horizontal', 'x', -50, 50, 1, v => `${v}%`)}
     {slider('Vertical', 'y', -50, 50, 1, v => `${v}%`)}
@@ -168,6 +177,7 @@ function PhotoWorkspace() {
   const [showPreflight, setShowPreflight] = useState(false);
   const [page, setPage] = useState(0);
   const [zoom, setZoom] = useState(74);
+  const [assetDropIndex, setAssetDropIndex] = useState(null);
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightTab, setRightTab] = useState('layout');
   const [toast, setToast] = useState('');
@@ -184,6 +194,7 @@ function PhotoWorkspace() {
   const pagePhotos = photos.slice(page * perPage, page * perPage + perPage);
   const selectedId = selectedIds[selectedIds.length - 1] || null;
   const selected = photos.find(p => p.id === selectedId);
+  const allPhotosSelected = photos.length > 0 && photos.every(photo => selectedIds.includes(photo.id));
   const preflightIssues = useMemo(() => {
     const issues = [];
     if (!photos.length) issues.push({ level: 'error', text: 'No photos have been added.' });
@@ -291,6 +302,14 @@ function PhotoWorkspace() {
     checkpoint();
     setPhotos(ps => ps.map(p => selectedIds.includes(p.id) ? { ...p, ...patch } : p));
   };
+  const smartExpand = (ids, autoRotate) => {
+    if (!ids.length) return;
+    const cellW = settings.fixedSize ? settings.photoWidth : (usableWidth - settings.gapX * (effectiveCols - 1)) / effectiveCols;
+    const cellH = settings.fixedSize ? settings.photoHeight : (usableHeight - settings.gapY * (effectiveRows - 1)) / effectiveRows;
+    checkpoint();
+    setPhotos(current => current.map(photo => ids.includes(photo.id) ? { ...photo, ...smartExpandSettings(photo, cellW, cellH, { autoRotate }) } : photo));
+    flash(`${ids.length} photo${ids.length > 1 ? 's' : ''} smart-expanded`);
+  };
   const removeSelected = () => {
     checkpoint();
     setPhotos(ps => ps.filter(p => !selectedIds.includes(p.id)));
@@ -309,6 +328,14 @@ function PhotoWorkspace() {
     next.splice(Math.min(targetGlobalIndex, next.length), 0, item);
     checkpoint(); setPhotos(next);
   };
+  const reorderPhoto = (id, insertionIndex) => {
+    const from = photos.findIndex(photo => photo.id === id);
+    if (from < 0 || insertionIndex == null || insertionIndex === from || insertionIndex === from + 1) { setAssetDropIndex(null); return; }
+    const next = [...photos], [moved] = next.splice(from, 1);
+    const destination = Math.max(0, Math.min(insertionIndex - (from < insertionIndex ? 1 : 0), next.length));
+    next.splice(destination, 0, moved); checkpoint(); setPhotos(next); setAssetDropIndex(null);
+    setPage(Math.floor(destination / perPage)); flash(`${moved.name} moved to Page ${Math.floor(destination / perPage) + 1}, Cell ${(destination % perPage) + 1}`);
+  };
   const formatKeys = ['fit', 'zoom', 'x', 'y', 'expandX', 'expandY', 'mirrorX', 'mirrorY', 'rotation', 'brightness', 'contrast', 'saturation'];
   const selectPhoto = (id, event = {}) => {
     if (!id) { if (!event.ctrlKey && !event.metaKey) setSelectedIds([]); return; }
@@ -323,40 +350,63 @@ function PhotoWorkspace() {
     } else setSelectedIds([id]);
     setRightTab('photo');
   };
+  const toggleSelectAllPhotos = () => {
+    if (!photos.length) return;
+    setSelectedIds(allPhotosSelected ? [] : photos.map(photo => photo.id));
+    setRightTab('photo');
+    flash(allPhotosSelected ? 'Photo selection cleared' : `${photos.length} photos selected`);
+  };
   const copyFormat = () => {
     if (!selected) return;
     setPaintFormat(Object.fromEntries(formatKeys.map(key => [key, selected[key]])));
     flash('Format copied — click a photo to apply');
   };
 
-  const printAllPages = () => {
+  const printAllPages = async () => {
     if (!photos.length) return flash('Add at least one photo first');
     setShowPreflight(false);
-    flash(`Preparing ${pages} A4 page${pages > 1 ? 's' : ''} for printing`);
-    requestAnimationFrame(() => requestAnimationFrame(() => window.print()));
+    setExporting(true);
+    const browserPreview = !window.paperframeDesktop?.openPrintPdf ? window.open('', '_blank') : null;
+    try {
+      flash(`Preparing ${pages} A4 page${pages > 1 ? 's' : ''} for print preview`);
+      const doc = await createLayoutPdf(), bytes = new Uint8Array(doc.output('arraybuffer'));
+      if (window.paperframeDesktop?.openPrintPdf) {
+        const result = await window.paperframeDesktop.openPrintPdf(bytes);
+        if (!result?.ok) throw Error(result?.error || 'Could not open print preview');
+      } else {
+        const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+        if (browserPreview) browserPreview.location.href = url;
+        else window.open(url, '_blank');
+        window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      }
+      flash('Print-ready PDF opened — use Print in the PDF viewer');
+    } catch (error) {
+      console.error(error); browserPreview?.close(); flash(error.message || 'Could not open print preview');
+    }
+    setExporting(false);
   };
 
   const imageData = photo => new Promise(resolve => {
     const canvas = document.createElement('canvas');
     const img = new Image();
     img.onload = () => {
-      canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
+      const angle = normalizedRotation(photo.rotation), radians = angle * Math.PI / 180;
+      const dimensions = rotatedDimensions(img.naturalWidth, img.naturalHeight, angle);
+      canvas.width = dimensions.width; canvas.height = dimensions.height;
       const c = canvas.getContext('2d');
       c.filter = `brightness(${photo.brightness}%) contrast(${photo.contrast}%) saturate(${photo.saturation}%)`;
       c.save();
-      c.translate(photo.mirrorX ? canvas.width : 0, photo.mirrorY ? canvas.height : 0);
+      c.translate(canvas.width / 2, canvas.height / 2);
+      c.rotate(radians);
       c.scale(photo.mirrorX ? -1 : 1, photo.mirrorY ? -1 : 1);
-      c.drawImage(img, 0, 0);
+      c.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
       c.restore();
-      resolve(canvas.toDataURL('image/jpeg', .93));
+      resolve({ dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height });
     };
     img.src = photo.url;
   });
 
-  const exportPdf = async () => {
-    if (!photos.length) return flash('Add at least one photo first');
-    setExporting(true);
-    try {
+  const createLayoutPdf = async () => {
       const doc = new jsPDF({ orientation: settings.orientation, unit: 'mm', format: 'a4', compress: true });
       const cellW = settings.fixedSize ? settings.photoWidth : (pw - settings.marginLeft - settings.marginRight - settings.gapX * (effectiveCols - 1)) / effectiveCols;
       const cellH = settings.fixedSize ? settings.photoHeight : (ph - settings.marginTop - settings.marginBottom - settings.gapY * (effectiveRows - 1)) / effectiveRows;
@@ -370,18 +420,21 @@ function PhotoWorkspace() {
           const y = settings.marginTop + row * (cellH + settings.gapY);
           doc.setFillColor(settings.background); doc.rect(x, y, cellW, cellH, 'F');
           if (photo) {
-            const ratio = photo.width / photo.height, cellRatio = cellW / cellH;
-            let w, h;
-            if ((photo.fit === 'contain' && ratio > cellRatio) || (photo.fit === 'cover' && ratio < cellRatio)) {
-              w = cellW * photo.zoom; h = w / ratio;
-            } else { h = cellH * photo.zoom; w = h * ratio; }
-            w *= photo.expandX || 1; h *= photo.expandY || 1;
+            if (photo.fit === 'smart') {
+              const background = fitImageRect(data[idx].width, data[idx].height, cellW, cellH, 'cover', 1.08, 1, 1);
+              const bx = x + (cellW - background.width) / 2, by = y + (cellH - background.height) / 2;
+              doc.saveGraphicsState(); doc.rect(x, y, cellW, cellH, null); doc.clip(); doc.discardPath();
+              doc.addImage(data[idx].dataUrl, 'PNG', bx, by, background.width, background.height, undefined, 'NONE');
+              doc.restoreGraphicsState();
+            }
+            const fitted = fitImageRect(data[idx].width, data[idx].height, cellW, cellH, photo.fit, photo.zoom, photo.expandX || 1, photo.expandY || 1);
+            const w = fitted.width, h = fitted.height;
             const ix = x + (cellW - w) / 2 + (photo.x / 100) * cellW;
             const iy = y + (cellH - h) / 2 + (photo.y / 100) * cellH;
             doc.saveGraphicsState();
             doc.rect(x, y, cellW, cellH, null);
             doc.clip(); doc.discardPath();
-            doc.addImage(data[idx], 'JPEG', ix, iy, w, h, undefined, 'FAST', photo.rotation);
+            doc.addImage(data[idx].dataUrl, 'PNG', ix, iy, w, h, undefined, 'NONE');
             doc.restoreGraphicsState();
           }
           if (settings.border) {
@@ -389,6 +442,14 @@ function PhotoWorkspace() {
           }
         }
       }
+      return doc;
+  };
+
+  const exportPdf = async () => {
+    if (!photos.length) return flash('Add at least one photo first');
+    setExporting(true);
+    try {
+      const doc = await createLayoutPdf();
       doc.save('paperframe-a4-layout.pdf');
       flash('Print-ready PDF downloaded');
     } catch (e) { console.error(e); flash('Could not create PDF'); }
@@ -404,14 +465,20 @@ function PhotoWorkspace() {
         onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); addFiles(e.dataTransfer.files); }}>
         <Upload size={18} /><span><strong>Add photos</strong><small>Drop images or browse</small></span>
       </button>
-      <div className="asset-list">
-        {photos.map((p, i) => <button key={p.id} draggable onDragStart={e => e.dataTransfer.setData('photoId', p.id)}
-          className={`asset ${selectedIds.includes(p.id) ? 'selected' : ''}`} onClick={e => { selectPhoto(p.id, e); setPage(Math.floor(i / perPage)); }}>
+      <div className="asset-list" onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget)) setAssetDropIndex(null); }} onDragOver={event => { event.preventDefault(); if (event.target === event.currentTarget) setAssetDropIndex(photos.length); }} onDrop={event => { event.preventDefault(); reorderPhoto(event.dataTransfer.getData('photoId'), assetDropIndex ?? photos.length); }}>
+        {photos.map((p, i) => <button key={p.id} draggable onDragStart={e => { e.dataTransfer.effectAllowed = 'move'; e.dataTransfer.setData('photoId', p.id); }} onDragEnd={() => setAssetDropIndex(null)}
+          onDragOver={event => { event.preventDefault(); event.stopPropagation(); const box = event.currentTarget.getBoundingClientRect(); setAssetDropIndex(event.clientY < box.top + box.height / 2 ? i : i + 1); }}
+          onDrop={event => { event.preventDefault(); event.stopPropagation(); reorderPhoto(event.dataTransfer.getData('photoId'), assetDropIndex ?? i); }}
+          className={`asset ${selectedIds.includes(p.id) ? 'selected' : ''} ${assetDropIndex === i ? 'drop-before' : ''} ${assetDropIndex === photos.length && i === photos.length - 1 ? 'drop-after' : ''}`} onClick={e => { selectPhoto(p.id, e); setPage(Math.floor(i / perPage)); }}>
           <img src={p.url} alt="" /><span><strong>{p.name}</strong><small>Page {Math.floor(i / perPage) + 1} · Cell {(i % perPage) + 1}</small></span><MoreHorizontal size={15} />
         </button>)}
         {!photos.length && <div className="asset-empty"><Layers3 size={24} /><p>Your uploaded photos will appear here.</p></div>}
       </div>
-      {photos.length > 0 && <button className="text-button danger-text" onClick={() => { checkpoint(); setPhotos([]); setSelectedIds([]); clearAutosave(); }}><Trash2 size={14} /> Clear all photos</button>}
+      {photos.length > 0 && <div className="asset-delete-actions">
+        <button className="text-button" onClick={toggleSelectAllPhotos}><Check size={14} /> {allPhotosSelected ? 'Deselect all' : 'Select all'}</button>
+        <button className="text-button danger-text" disabled={!selectedIds.length} onClick={removeSelected}><Trash2 size={14} /> Delete selected{selectedIds.length > 1 ? ` (${selectedIds.length})` : ''}</button>
+        <button className="text-button danger-text" onClick={() => { checkpoint(); setPhotos([]); setSelectedIds([]); clearAutosave(); }}><Trash2 size={14} /> Clear all photos</button>
+      </div>}
     </aside>
     {!leftOpen && <IconButton label="Open photos" className="floating-left" onClick={() => setLeftOpen(true)}><ImageIcon size={17} /></IconButton>}
 
@@ -564,7 +631,7 @@ function PhotoWorkspace() {
             <input type="checkbox" checked={settings.border} onChange={e => changeSettings(s => ({ ...s, border: e.target.checked }))} /><i /></label>
         </section>
         <div className="print-note"><Printer size={17} /><div><strong>Print at actual size</strong><p>Choose “Actual size” or “100%” in your printer dialog for precise dimensions.</p></div></div>
-      </div> : <div className="settings-content"><PhotoEditorPanel photo={selected} selectedCount={selectedIds.length} onUpdate={updateSelected} onDelete={removeSelected} onDuplicate={duplicateSelected} onCopyFormat={copyFormat} painterActive={Boolean(paintFormat)} /></div>}
+      </div> : <div className="settings-content"><PhotoEditorPanel photo={selected} selectedCount={selectedIds.length} onUpdate={updateSelected} onDelete={removeSelected} onDuplicate={duplicateSelected} onCopyFormat={copyFormat} onSmartExpand={autoRotate => smartExpand(selectedIds, autoRotate)} onSmartExpandAll={autoRotate => smartExpand(photos.map(photo => photo.id), autoRotate)} painterActive={Boolean(paintFormat)} /></div>}
     </aside>
     <Toast message={toast} />
   </div>;
@@ -647,7 +714,7 @@ const savePdf = (bytes, name) => {
   setTimeout(() => URL.revokeObjectURL(url), 1200);
 };
 const loadPdfItem = async file => {
-  const originalBytes = await file.arrayBuffer();
+  const originalBytes = new Uint8Array(await file.arrayBuffer());
   try {
     const document = await PDFDocument.load(originalBytes);
     return { file, bytes: originalBytes, name: file.name, pages: document.getPageCount(), size: file.size, id: crypto.randomUUID(), rotation: 0, repaired: false };
@@ -752,24 +819,114 @@ function DocumentBar({ item, icon, onReplace }) {
   return <div className="loaded-document"><div className="pdf-thumb">{icon}<span>{item.pages}</span></div><div><strong>{item.name}</strong><small>{item.pages} pages · {prettyBytes(item.size)}{item.repaired ? ' · automatically repaired' : ''}</small></div><button className="secondary" onClick={onReplace}>Replace</button></div>;
 }
 
+async function rebuildPdfAsImages(bytes, level, onProgress) {
+  const loading = pdfjsLib.getDocument({ data: bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes) });
+  try {
+    const source = await loading.promise, output = await PDFDocument.create();
+    const scale = 0.45 + (level * 1.55), quality = 0.3 + (level * 0.64);
+    output.setProducer('Paperframe Studio');
+    for (let index = 1; index <= source.numPages; index++) {
+      onProgress?.(index, source.numPages);
+      const sourcePage = await source.getPage(index), pageSize = sourcePage.getViewport({ scale: 1 });
+      const viewport = sourcePage.getViewport({ scale });
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.max(1, Math.ceil(viewport.width)); canvas.height = Math.max(1, Math.ceil(viewport.height));
+      const context = canvas.getContext('2d', { alpha: false });
+      context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+      await sourcePage.render({ canvas: null, canvasContext: context, viewport }).promise;
+      onProgress?.(index, source.numPages, 'encoding');
+      const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(Error('Image encoding failed')), 'image/jpeg', quality));
+      onProgress?.(index, source.numPages, 'building');
+      const image = await output.embedJpg(await blob.arrayBuffer()), page = output.addPage([pageSize.width, pageSize.height]);
+      page.drawImage(image, { x: 0, y: 0, width: pageSize.width, height: pageSize.height });
+      canvas.width = 1; canvas.height = 1;
+    }
+    return output.save({ useObjectStreams: true, addDefaultPage: false, objectsPerTick: 100 });
+  } finally { await loading.destroy(); }
+}
+
+async function extractJpegOnlyPages(bytes) {
+  const document = await PDFDocument.load(bytes instanceof Uint8Array ? bytes.slice() : bytes.slice(0));
+  const extracted = [];
+  for (const page of document.getPages()) {
+    const resources = page.node.Resources(), xObjects = resources?.lookup(PDFName.of('XObject'));
+    if (!xObjects?.entries) return null;
+    const images = xObjects.entries().map(([, reference]) => document.context.lookup(reference)).filter(stream => {
+      const subtype = stream?.dict?.get(PDFName.of('Subtype'))?.toString();
+      const contents = stream?.contents;
+      return subtype === '/Image' && contents?.[0] === 0xff && contents?.[1] === 0xd8;
+    });
+    if (images.length !== 1) return null;
+    extracted.push({ jpeg: images[0].contents.slice(), size: page.getSize() });
+  }
+  return extracted;
+}
+
+async function rebuildJpegOnlyPdf(pages, level, onProgress) {
+  const output = await PDFDocument.create(), scale = 0.4 + (level * 0.6), quality = 0.3 + (level * 0.64);
+  output.setProducer('Paperframe Studio');
+  for (let index = 0; index < pages.length; index++) {
+    onProgress?.(index + 1, pages.length, 'encoding');
+    const source = pages[index], bitmap = await createImageBitmap(new Blob([source.jpeg], { type: 'image/jpeg' }));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d', { alpha: false }); context.fillStyle = '#fff'; context.fillRect(0, 0, canvas.width, canvas.height);
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
+    const blob = await new Promise((resolve, reject) => canvas.toBlob(value => value ? resolve(value) : reject(Error('Image encoding failed')), 'image/jpeg', quality));
+    const image = await output.embedJpg(await blob.arrayBuffer()), page = output.addPage([source.size.width, source.size.height]);
+    page.drawImage(image, { x: 0, y: 0, width: source.size.width, height: source.size.height });
+    canvas.width = 1; canvas.height = 1;
+  }
+  return output.save({ useObjectStreams: true, addDefaultPage: false, objectsPerTick: 100 });
+}
+
 function CompressTool({ notify }) {
   const [item, setItem] = useState(null), [result, setResult] = useState(null), [busy, setBusy] = useState(false);
-  const add = async files => { try { const loaded = await loadPdfItem(files[0]); setItem(loaded); setResult(null); if (loaded.repaired) notify('Incomplete image-only PDF repaired automatically'); } catch { notify('Could not read this PDF'); } };
+  const [target, setTarget] = useState('500'), [unit, setUnit] = useState('KB'), [progress, setProgress] = useState('');
+  const add = async files => { try { const loaded = await loadPdfItem(files[0]); setItem(loaded); setResult(null); setProgress(''); setUnit('KB'); setTarget(String(Math.max(50, Math.round((loaded.size / 1024) * .65)))); if (loaded.repaired) notify('Incomplete image-only PDF repaired automatically'); } catch { notify('Could not read this PDF'); } };
   const optimize = async () => {
+    const amount = Number(target), targetBytes = Math.floor(amount * (unit === 'MB' ? 1024 * 1024 : 1024));
+    if (!Number.isFinite(amount) || amount <= 0) { notify('Enter a valid target size'); return; }
+    if (targetBytes < 10240) { notify('Target must be at least 10 KB'); return; }
     setBusy(true);
     try {
-      const source = await PDFDocument.load(item.bytes), out = await PDFDocument.create(), pages = await out.copyPages(source, source.getPageIndices());
+      setResult(null); setProgress('Trying lossless optimization…');
+      const compressionSource = item.bytes instanceof Uint8Array ? item.bytes.slice() : new Uint8Array(item.bytes.slice(0));
+      const source = await PDFDocument.load(compressionSource.slice()), out = await PDFDocument.create(), pages = await out.copyPages(source, source.getPageIndices());
       pages.forEach(page => out.addPage(page)); out.setProducer('Paperframe Studio');
-      const bytes = await out.save({ useObjectStreams: true, addDefaultPage: false, objectsPerTick: 100 });
-      setResult(bytes); notify(bytes.length < item.size ? 'PDF optimized' : 'PDF is already well optimized');
-    } catch { notify('Could not optimize PDF'); } setBusy(false);
+      const lossless = await out.save({ useObjectStreams: true, addDefaultPage: false, objectsPerTick: 100 });
+      if (lossless.length <= targetBytes) {
+        setResult({ bytes: lossless, reached: true, mode: 'Lossless', targetBytes });
+        setProgress('Target reached without reducing image quality'); notify('Target reached with lossless optimization'); setBusy(false); return;
+      }
+      const jpegPages = await extractJpegOnlyPages(compressionSource);
+      const rebuild = jpegPages
+        ? (level, callback) => rebuildJpegOnlyPdf(jpegPages, level, callback)
+        : (level, callback) => rebuildPdfAsImages(compressionSource, level, callback);
+      const minimum = await rebuild(0, (page, total, stage = 'rendering') => setProgress(`Testing minimum profile · ${stage} page ${page} of ${total}`));
+      if (minimum.length > targetBytes) {
+        setResult({ bytes: minimum, reached: false, mode: 'Maximum compression', targetBytes });
+        setProgress(`The smallest high-legibility result is ${prettyBytes(minimum.length)}`);
+        notify('The requested target is too small for this document'); setBusy(false); return;
+      }
+      let low = 0, high = 1, best = minimum;
+      for (let attempt = 1; attempt <= 7; attempt++) {
+        const level = (low + high) / 2;
+        const candidate = await rebuild(level, (page, total, stage = 'rendering') => setProgress(`Finding best quality · pass ${attempt}/7 · ${stage} page ${page}/${total}`));
+        if (candidate.length <= targetBytes) { best = candidate; low = level; } else high = level;
+      }
+      setResult({ bytes: best, reached: true, mode: 'Quality matched', targetBytes });
+      setProgress(`Target reached at the highest tested quality · ${prettyBytes(best.length)}`); notify('PDF compressed to the requested size');
+    } catch (error) { console.error(error); setProgress(''); notify('Could not compress this PDF'); } setBusy(false);
   };
   if (!item) return <ToolDrop title="Drop one PDF to compress" onFiles={add} />;
-  return <div className="tool-workarea"><DocumentBar item={item} icon={<Maximize2 size={24} />} onReplace={() => { setItem(null); setResult(null); }} />
-    <div className="compression-meter"><div><small>BEFORE</small><strong>{prettyBytes(item.size)}</strong></div><ArrowRight size={21} /><div><small>AFTER</small><strong>{result ? prettyBytes(result.length) : '—'}</strong></div></div>
-    <div className="compression-note"><Sparkles size={18} /><div><strong>Quality-safe optimization</strong><p>Rebuilds PDF object streams and removes unused structure without making images blurry.</p></div></div>
-    {!result ? <button className="primary tool-main-action" disabled={busy} onClick={optimize}>{busy ? <LoaderCircle className="spin" size={16} /> : <Maximize2 size={16} />} Optimize PDF</button>
-      : <button className="primary tool-main-action" onClick={() => savePdf(result, `${item.name.replace(/\.pdf$/i, '')}-compressed.pdf`)}><Download size={16} /> Download optimized PDF</button>}</div>;
+  return <div className="tool-workarea"><DocumentBar item={item} icon={<Maximize2 size={24} />} onReplace={() => { setItem(null); setResult(null); setProgress(''); }} />
+    <div className="compression-target"><label><span>Required file size</span><div><input type="number" min="10" step="1" value={target} disabled={busy} onChange={e => { setTarget(e.target.value); setResult(null); }} /><select value={unit} disabled={busy} onChange={e => { setUnit(e.target.value); setResult(null); }}><option>KB</option><option>MB</option></select></div></label><small>Paperframe finds the highest quality result that fits this limit.</small></div>
+    <div className="compression-meter"><div><small>BEFORE</small><strong>{prettyBytes(item.size)}</strong></div><ArrowRight size={21} /><div><small>AFTER</small><strong>{result ? prettyBytes(result.bytes.length) : '—'}</strong>{result && <em className={result.reached ? 'target-hit' : 'target-miss'}>{result.reached ? 'Target met' : 'Closest possible'}</em>}</div></div>
+    <div className="compression-note"><Sparkles size={18} /><div><strong>Smart quality-first compression</strong><p>First preserves the original PDF structure. If that cannot meet the target, it carefully balances page resolution and image quality. Very small targets may convert searchable text and forms into page images.</p></div></div>
+    {progress && <div className="compression-progress">{busy && <LoaderCircle className="spin" size={14} />}{progress}</div>}
+    {!result ? <button className="primary tool-main-action" disabled={busy} onClick={optimize}>{busy ? <LoaderCircle className="spin" size={16} /> : <Maximize2 size={16} />} {busy ? 'Compressing…' : 'Compress to target'}</button>
+      : <div className="compression-actions"><button className="secondary" disabled={busy} onClick={optimize}><Maximize2 size={15} /> Try again</button><button className="primary" onClick={() => savePdf(result.bytes, `${item.name.replace(/\.pdf$/i, '')}-compressed.pdf`)}><Download size={16} /> Download compressed PDF</button></div>}</div>;
 }
 
 function PdfPageThumbnail({ bytes, pageIndex, rotation }) {
@@ -785,7 +942,7 @@ function PdfPageThumbnail({ bytes, pageIndex, rotation }) {
         const viewport = page.getViewport({ scale, rotation }), canvas = ref.current;
         if (!canvas || cancelled) return;
         canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        await page.render({ canvas: null, canvasContext: canvas.getContext('2d'), viewport }).promise;
       } catch { /* Thumbnail remains as a page placeholder. */ }
     })();
     return () => { cancelled = true; loading?.destroy(); };
@@ -854,7 +1011,7 @@ function AnnotateTool({ notify }) {
         canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
         canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`;
         scaleRef.current = { x: base.width / viewport.width, y: base.height / viewport.height, pageWidth: base.width, pageHeight: base.height };
-        await page.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+        await page.render({ canvas: null, canvasContext: canvas.getContext('2d'), viewport }).promise;
       } catch { if (!cancelled) notify('Could not render this page'); }
     })();
     return () => { cancelled = true; loading?.destroy(); };
@@ -933,30 +1090,48 @@ function PenToolIcon() { return <Move size={24} />; }
 function ConvertTool({ notify }) {
   const [mode, setMode] = useState('word'), [busy, setBusy] = useState(false), [files, setFiles] = useState([]);
   const [range, setRange] = useState('all'), [ocrScans, setOcrScans] = useState(false), [pngScale, setPngScale] = useState(2);
+  const [excelMode, setExcelMode] = useState('exact'), [validateTotals, setValidateTotals] = useState(true);
+  const [zipSeparate, setZipSeparate] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0, label: '' });
-  const imageRef = useRef(), pdfRef = useRef();
-  const addPdfs = incoming => {
-    const added = [...incoming].filter(file => file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf'))
+  const fileRef = useRef();
+  const modes = [
+    { id: 'word', group: 'FROM PDF', from: 'PDF', to: 'Word', hint: 'Editable DOCX', icon: FileText },
+    { id: 'excel', group: 'FROM PDF', from: 'PDF', to: 'Excel', hint: 'Formatted XLSX', icon: Grid2X2 },
+    { id: 'png', group: 'FROM PDF', from: 'PDF', to: 'PNG', hint: 'One image per page', icon: FileImage },
+    { id: 'jpeg-pdf', group: 'CREATE PDF', from: 'JPEG', to: 'PDF', hint: 'Batch image conversion', icon: FileImage },
+    { id: 'jpg-pdf', group: 'CREATE PDF', from: 'JPG', to: 'PDF', hint: 'Batch image conversion', icon: FileImage },
+    { id: 'png-pdf', group: 'CREATE PDF', from: 'PNG', to: 'PDF', hint: 'Lossless image pages', icon: FileImage },
+    { id: 'word-pdf', group: 'CREATE PDF', from: 'Word', to: 'PDF', hint: 'DOCX documents', icon: FileText },
+    { id: 'excel-pdf', group: 'CREATE PDF', from: 'Excel', to: 'PDF', hint: 'XLSX worksheets', icon: Grid2X2 }
+  ];
+  const selectedMode = modes.find(option => option.id === mode), createsPdf = mode.endsWith('-pdf');
+  const chooseMode = next => { if (busy) return; setMode(next); setFiles([]); setProgress({ done: 0, total: 0, label: '' }); };
+  const accepts = file => {
+    const extension = file.name.toLowerCase().split('.').pop();
+    if (!createsPdf) return extension === 'pdf';
+    return mode === 'jpeg-pdf' ? extension === 'jpeg' : mode === 'jpg-pdf' ? extension === 'jpg' : mode === 'png-pdf' ? extension === 'png' : mode === 'word-pdf' ? extension === 'docx' : extension === 'xlsx';
+  };
+  const addFiles = incoming => {
+    const added = [...incoming].filter(accepts)
       .map(file => ({ id: crypto.randomUUID(), file, name: file.name, size: file.size, status: 'Ready' }));
     setFiles(current => [...current, ...added]);
-    if (added.length) notify(`${added.length} PDF${added.length > 1 ? 's' : ''} added to conversion queue`);
-  };
-  const imagesToPdf = async files => {
-    if (!files.length) return; setBusy(true);
-    try {
-      const doc = await PDFDocument.create();
-      for (const file of [...files]) {
-        const bytes = await file.arrayBuffer(), image = file.type === 'image/png' ? await doc.embedPng(bytes) : await doc.embedJpg(bytes);
-        const page = doc.addPage([595.28, 841.89]), scaled = image.scaleToFit(555.28, 801.89);
-        page.drawImage(image, { x: (595.28 - scaled.width) / 2, y: (841.89 - scaled.height) / 2, width: scaled.width, height: scaled.height });
-      }
-      savePdf(await doc.save({ useObjectStreams: true }), 'paperframe-images.pdf'); notify(`${files.length} images converted to PDF`);
-    } catch { notify('Could not convert these images'); } setBusy(false);
+    if (added.length) notify(`${added.length} file${added.length > 1 ? 's' : ''} added to conversion queue`);
+    else notify(`Choose ${selectedMode.from} ${mode === 'word-pdf' ? '(.docx)' : mode === 'excel-pdf' ? '(.xlsx)' : ''} files`);
   };
   const convertBatch = async () => {
-    if (!files.length) return notify('Add at least one PDF'); setBusy(true);
+    if (!files.length) return notify('Add at least one file'); setBusy(true);
     const workerRef = { current: null }, outputs = [];
     try {
+      if (createsPdf) {
+        setProgress({ done: 0, total: files.length, label: 'Preparing conversion' });
+        for (let index = 0; index < files.length; index++) {
+          const queued = files[index]; setFiles(current => current.map(entry => entry.id === queued.id ? { ...entry, status: 'Converting…' } : entry));
+          const output = await convertInputToPdf(queued.file, mode); outputs.push(output);
+          setFiles(current => current.map(entry => entry.id === queued.id ? { ...entry, status: 'Complete' } : entry));
+          setProgress({ done: index + 1, total: files.length, label: queued.name });
+        }
+        await downloadOutputs(outputs, 'pdf', zipSeparate); notify(`${files.length} file${files.length > 1 ? 's' : ''} converted to PDF`); setBusy(false); return;
+      }
       const counts = await Promise.all(files.map(entry => countSelectedPages(entry.file, range))), total = counts.reduce((sum, count) => sum + count, 0);
       if (!total) throw Error('The selected page range is empty');
       setProgress({ done: 0, total, label: 'Preparing conversion' });
@@ -964,7 +1139,7 @@ function ConvertTool({ notify }) {
       for (const queued of files) {
         setFiles(current => current.map(entry => entry.id === queued.id ? { ...entry, status: 'Converting…' } : entry));
         const converted = await convertPdf(queued.file, mode, {
-          range, ocr: ocrScans, pngScale, worker: workerRef.current,
+          range, ocr: ocrScans, pngScale, worker: workerRef.current, excelMode, validateTotals,
           onPage: pageNumber => setProgress(current => ({ ...current, done: current.done + 1, label: `${queued.name} · page ${pageNumber}` }))
         });
         converted.forEach(output => {
@@ -974,9 +1149,10 @@ function ConvertTool({ notify }) {
           }
           outputs.push({ ...output, name });
         });
-        setFiles(current => current.map(entry => entry.id === queued.id ? { ...entry, status: 'Complete' } : entry));
+        const analysis = converted[0]?.analysis;
+        setFiles(current => current.map(entry => entry.id === queued.id ? { ...entry, status: 'Complete', analysis } : entry));
       }
-      if (workerRef.current) await workerRef.current.terminate(); await downloadOutputs(outputs, mode);
+      if (workerRef.current) await workerRef.current.terminate(); await downloadOutputs(outputs, mode, zipSeparate);
       notify(`${files.length} PDF${files.length > 1 ? 's' : ''} converted successfully`);
     } catch (error) {
       console.error(error); if (workerRef.current) await workerRef.current.terminate(); notify(error?.message || 'Conversion failed');
@@ -985,16 +1161,18 @@ function ConvertTool({ notify }) {
     setBusy(false);
   };
   const totalMb = files.reduce((sum, entry) => sum + entry.size, 0) / 1048576;
-  return <div className="convert-workarea batch-converter"><div className="edit-kind four"><button className={mode === 'word' ? 'selected' : ''} onClick={() => setMode('word')}>PDF to Word</button><button className={mode === 'excel' ? 'selected' : ''} onClick={() => setMode('excel')}>PDF to Excel</button><button className={mode === 'png' ? 'selected' : ''} onClick={() => setMode('png')}>PDF to PNG</button><button className={mode === 'images' ? 'selected' : ''} onClick={() => setMode('images')}>Images to PDF</button></div>
-    {mode === 'images' ? <><input ref={imageRef} hidden type="file" multiple accept="image/png,image/jpeg" onChange={event => imagesToPdf(event.target.files)} /><button className="pdf-drop" disabled={busy} onClick={() => imageRef.current.click()}><div>{busy ? <LoaderCircle className="spin" size={24} /> : <ImageIcon size={24} />}</div><strong>Choose multiple PNG or JPEG images</strong><span>One centered A4 page will be created per image</span></button></> : <>
-      <input ref={pdfRef} hidden type="file" multiple accept=".pdf,application/pdf" onChange={event => { addPdfs(event.target.files); event.target.value = ''; }} />
-      <button className="pdf-drop batch-drop" disabled={busy} onClick={() => pdfRef.current.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addPdfs(event.dataTransfer.files); }}><div><FilePlus2 size={24} /></div><strong>Add PDFs for batch conversion</strong><span>Choose any number of files · processed privately on this device</span></button>
-      {files.length > 0 && <><div className="convert-queue-head"><span><strong>{files.length} PDF{files.length > 1 ? 's' : ''}</strong><small>{totalMb < 1 ? 'Under 1 MB' : `${totalMb.toFixed(1)} MB total`}</small></span><button className="text-button danger-text" disabled={busy} onClick={() => setFiles([])}><Trash2 size={13} /> Clear</button></div>
-        <div className="convert-queue">{files.map(entry => <div className="convert-file" key={entry.id}><FileText size={19} /><span><strong>{entry.name}</strong><small>{(entry.size / 1048576).toFixed(2)} MB</small></span><em className={entry.status.toLowerCase().replace('…', '')}>{entry.status}</em><IconButton label="Remove file" disabled={busy} onClick={() => setFiles(current => current.filter(file => file.id !== entry.id))}><X size={14} /></IconButton></div>)}</div>
-        <div className="convert-settings"><label><span>Pages</span><input value={range} onChange={event => setRange(event.target.value)} placeholder="all or 1-3, 7" /></label>{mode === 'png' ? <label><span>PNG resolution</span><select value={pngScale} onChange={event => setPngScale(Number(event.target.value))}><option value="1.5">Standard · 108 DPI</option><option value="2">High · 144 DPI</option><option value="3">Print · 216 DPI</option><option value="4">Ultra · 288 DPI</option></select></label> : <label className="convert-check"><input type="checkbox" checked={ocrScans} onChange={event => setOcrScans(event.target.checked)} /><span><strong>OCR scanned pages</strong><small>Recognize image-only text in English</small></span></label>}</div>
-        {busy && <div className="convert-progress"><span><b style={{ width: `${progress.total ? progress.done / progress.total * 100 : 0}%` }} /></span><small>{progress.label} · {progress.done}/{progress.total} pages</small></div>}
-        <button className="primary tool-main-action" disabled={busy} onClick={convertBatch}>{busy ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} {busy ? 'Converting locally…' : `Convert ${files.length} PDF${files.length > 1 ? 's' : ''} to ${mode.toUpperCase()}`}</button></>}
-    </>}
+  return <div className="convert-workarea batch-converter"><div className="conversion-picker">{['FROM PDF', 'CREATE PDF'].map(group => <section key={group}><header><span>{group}</span><small>{group === 'FROM PDF' ? 'Export PDF content' : 'Turn local files into PDFs'}</small></header><div>{modes.filter(option => option.group === group).map(option => { const ModeIcon = option.icon; return <button key={option.id} className={mode === option.id ? 'selected' : ''} onClick={() => chooseMode(option.id)}><ModeIcon size={18} /><span><strong>{option.from} <ArrowRight size={11} /> {option.to}</strong><small>{option.hint}</small></span>{mode === option.id && <Check size={14} />}</button>; })}</div></section>)}</div>
+    <div className="conversion-current"><span>Selected conversion</span><strong>{selectedMode.from} <ArrowRight size={13} /> {selectedMode.to}</strong></div>
+      <input ref={fileRef} hidden type="file" multiple accept={acceptedInput(mode)} onChange={event => { addFiles(event.target.files); event.target.value = ''; }} />
+      <button className="pdf-drop batch-drop" disabled={busy} onClick={() => fileRef.current.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addFiles(event.dataTransfer.files); }}><div><FilePlus2 size={24} /></div><strong>Add {selectedMode.from} files</strong><span>Choose multiple files · processed privately on this device</span></button>
+      {files.length > 0 && <><div className="convert-queue-head"><span><strong>{files.length} file{files.length > 1 ? 's' : ''}</strong><small>{totalMb < 1 ? 'Under 1 MB' : `${totalMb.toFixed(1)} MB total`}</small></span><button className="text-button danger-text" disabled={busy} onClick={() => setFiles([])}><Trash2 size={13} /> Clear</button></div>
+        <div className="convert-queue">{files.map(entry => <div className="convert-file" key={entry.id}><FileText size={19} /><span><strong>{entry.name}</strong><small>{entry.analysis?.length ? entry.analysis.map(page => page.columns ? `Page ${page.page}: ${page.columns} columns · ${page.rows} rows${page.ambiguous ? ` · ${page.ambiguous} review` : ''}` : `Page ${page.page}: free text`).join(' | ') : `${(entry.size / 1048576).toFixed(2)} MB`}</small></span><em className={entry.status.toLowerCase().replace('…', '')}>{entry.status}</em><IconButton label="Remove file" disabled={busy} onClick={() => setFiles(current => current.filter(file => file.id !== entry.id))}><X size={14} /></IconButton></div>)}</div>
+        {!createsPdf && <><div className="convert-settings"><label><span>Pages</span><input value={range} onChange={event => setRange(event.target.value)} placeholder="all or 1-3, 7" /></label>{mode === 'png' ? <label><span>PNG resolution</span><select value={pngScale} onChange={event => setPngScale(Number(event.target.value))}><option value="1.5">Standard · 108 DPI</option><option value="2">High · 144 DPI</option><option value="3">Print · 216 DPI</option><option value="4">Ultra · 288 DPI</option></select></label> : <label className="convert-check"><input type="checkbox" checked={ocrScans} onChange={event => setOcrScans(event.target.checked)} /><span><strong>OCR scanned pages</strong><small>Recognize image-only text in English</small></span></label>}</div>
+        {mode === 'excel' && <div className="excel-convert-options"><div className="excel-mode-picker"><button className={excelMode === 'exact' ? 'selected' : ''} onClick={() => setExcelMode('exact')}><strong>Exact layout</strong><small>Source colors, borders, merged title and print layout</small></button><button className={excelMode === 'data' ? 'selected' : ''} onClick={() => setExcelMode('data')}><strong>Clean data</strong><small>Filters and editable cell types, with no formulas or calculations</small></button></div><label className="excel-validation"><input type="checkbox" checked={validateTotals} onChange={event => setValidateTotals(event.target.checked)} /><span><strong>Include source-total note</strong><small>Clean Data mode only · repeats totals printed in the PDF without calculating</small></span></label><p>Values are copied from the PDF exactly as displayed. Paperframe never invents formulas or recalculates totals.</p></div>}</>}
+        {createsPdf && <div className="conversion-note"><Sparkles size={16} /><span><strong>Layout-aware local conversion</strong><small>{mode === 'excel-pdf' ? 'Worksheet values, colors, borders and sheet structure are carried into print-ready PDF pages.' : mode === 'word-pdf' ? 'Paragraphs, headings, text styling and tables are arranged into A4 PDF pages.' : 'Each image becomes its own correctly oriented, centered A4 PDF.'}</small></span></div>}
+        <label className="zip-separate-option"><input type="checkbox" checked={zipSeparate} onChange={event => setZipSeparate(event.target.checked)} /><span><strong>Download separate files as ZIP</strong><small>Keep every converted document separate inside one ZIP archive</small></span></label>
+        {busy && <div className="convert-progress"><span><b style={{ width: `${progress.total ? progress.done / progress.total * 100 : 0}%` }} /></span><small>{progress.label} · {progress.done}/{progress.total} {createsPdf ? 'files' : 'pages'}</small></div>}
+        <button className="primary tool-main-action" disabled={busy} onClick={convertBatch}>{busy ? <LoaderCircle className="spin" size={16} /> : <Download size={16} />} {busy ? 'Converting locally…' : `Convert ${files.length} file${files.length > 1 ? 's' : ''} to ${selectedMode.to}`}</button></>}
   </div>;
 }
 
@@ -1047,7 +1225,7 @@ function LegacyEditTool({ notify }) {
         const ratio = Math.min(window.devicePixelRatio || 1, 2), context = canvas.getContext('2d');
         canvas.width = Math.floor(viewport.width * ratio); canvas.height = Math.floor(viewport.height * ratio);
         canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`;
-        await pdfPage.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] }).promise;
+        await pdfPage.render({ canvas: null, canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] }).promise;
         const content = await pdfPage.getTextContent();
         const fragments = content.items.filter(entry => entry.str?.trim()).map((entry, index) => {
           const transform = pdfjsLib.Util.transform(viewport.transform, entry.transform);
@@ -1256,7 +1434,7 @@ function ProPdfPageThumbnail({ item, number, active, onClick }) {
         if (cancelled || !ref.current) return;
         const canvas = ref.current, context = canvas.getContext('2d');
         canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
-        await pdfPage.render({ canvasContext: context, viewport }).promise;
+        await pdfPage.render({ canvas: null, canvasContext: context, viewport }).promise;
       } catch {}
     })();
     return () => { cancelled = true; };
@@ -1345,7 +1523,7 @@ function EditTool({ notify }) {
         const ratio = Math.min(window.devicePixelRatio || 1, 2), context = canvas.getContext('2d');
         canvas.width = Math.floor(viewport.width * ratio); canvas.height = Math.floor(viewport.height * ratio);
         canvas.style.width = `${viewport.width}px`; canvas.style.height = `${viewport.height}px`;
-        renderTask = pdfPage.render({ canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] });
+        renderTask = pdfPage.render({ canvas: null, canvasContext: context, viewport, transform: ratio === 1 ? null : [ratio, 0, 0, ratio, 0, 0] });
         await renderTask.promise;
         const content = await pdfPage.getTextContent(), fragments = content.items.filter(entry => entry.str?.trim()).map((entry, index) => {
           const transformed = pdfjsLib.Util.transform(viewport.transform, entry.transform);
@@ -1588,7 +1766,7 @@ function EditTool({ notify }) {
           }
           const renderedPage = await renderedPdf.getPage(pageIndex + 1), viewport = renderedPage.getViewport({ scale: 2 });
           const canvas = document.createElement('canvas'); canvas.width = Math.ceil(viewport.width); canvas.height = Math.ceil(viewport.height);
-          await renderedPage.render({ canvasContext: canvas.getContext('2d'), viewport }).promise;
+          await renderedPage.render({ canvas: null, canvasContext: canvas.getContext('2d'), viewport }).promise;
           const pngBytes = await (await fetch(canvas.toDataURL('image/png'))).arrayBuffer(), image = await flattened.embedPng(pngBytes);
           const originalSize = editedSource.getPage(pageIndex).getSize(), flattenedPage = flattened.addPage([originalSize.width, originalSize.height]);
           flattenedPage.drawImage(image, { x: 0, y: 0, width: originalSize.width, height: originalSize.height });
@@ -1693,12 +1871,12 @@ function App() {
   };
   return <div className="app">
     <header className="app-header">
-      <button className="brand" onClick={() => setMode('photos')}><span className="brand-mark"><img src="/assets/paperframe-logo.png" alt="" /></span><span>Paperframe<small>STUDIO</small></span></button>
+      <button className="brand" onClick={() => setMode('photos')}><span className="brand-mark"><img src="/assets/paperframe-header.png" alt="" /></span><span>Paperframe<small>STUDIO</small></span></button>
       <nav>
         <button className={mode === 'photos' ? 'active' : ''} onClick={() => setMode('photos')}><ImageIcon size={16} /> Photo layout</button>
         <button className={mode === 'pdf' ? 'active' : ''} onClick={() => setMode('pdf')}><FileText size={16} /> PDF tools</button>
       </nav>
-      <div className="header-right"><a className="privacy" href="/privacy.html" title="Read the privacy policy"><span /> Private by design</a><a className="help" href="/help.html" aria-label="Help and frequently asked questions">?</a></div>
+      <div className="header-right"><div className="creator-credit" title="Created by Ayushman Mishra"><img src="/assets/ayushman-mishra-creator.png" alt="Ayushman Mishra" /><span><small>CREATED BY</small><strong>Ayushman Mishra</strong></span></div><a className="privacy" href="/privacy.html" title="Read the privacy policy"><span /> Private by design</a><a className="help" href="/about.html" aria-label="About Paperframe Studio" title="About Paperframe Studio"><Info size={15} /></a></div>
     </header>
     {mode === 'photos' ? <PhotoWorkspace /> : <PdfWorkspace />}
   </div>;
@@ -1706,6 +1884,6 @@ function App() {
 
 createRoot(document.getElementById('root')).render(<App />);
 
-if ('serviceWorker' in navigator && import.meta.env.PROD) {
+if ('serviceWorker' in navigator && import.meta.env.PROD && !navigator.userAgent.includes('Electron')) {
   window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js'));
 }

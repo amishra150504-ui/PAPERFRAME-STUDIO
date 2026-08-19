@@ -4,7 +4,7 @@
   "description": "Private A4 photo layout and PDF editing studio for Windows.",
   "author": "Ayush Mishra",
   "private": true,
-  "version": "1.0.0",
+  "version": "1.0.15",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {

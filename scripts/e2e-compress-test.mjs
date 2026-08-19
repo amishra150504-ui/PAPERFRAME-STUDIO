@@ -1,0 +1,18 @@
+const [target] = await fetch('http://127.0.0.1:9333/json').then(response => response.json());
+const socket = new WebSocket(target.webSocketDebuggerUrl);
+let id = 0; const waiting = new Map();
+socket.addEventListener('message', event => { const message = JSON.parse(event.data); if (message.id && waiting.has(message.id)) { const job = waiting.get(message.id); waiting.delete(message.id); message.error ? job.reject(message.error) : job.resolve(message.result); } if (message.method === 'Runtime.exceptionThrown') console.error(JSON.stringify(message.params)); });
+await new Promise((resolve, reject) => { socket.addEventListener('open', resolve, { once: true }); socket.addEventListener('error', reject, { once: true }); });
+const send = (method, params = {}) => new Promise((resolve, reject) => { const requestId = ++id; waiting.set(requestId, { resolve, reject }); socket.send(JSON.stringify({ id: requestId, method, params })); });
+const evaluate = expression => send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+await send('Runtime.enable'); await send('DOM.enable'); await send('Page.reload', { ignoreCache: true }); await wait(1200);
+await evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('PDF tools'))?.click()`); await wait(300);
+await evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('Compress PDF'))?.click()`); await wait(300);
+const root = await send('DOM.getDocument', { depth: -1 }), input = await send('DOM.querySelector', { nodeId: root.root.nodeId, selector: 'input[type=file]' });
+await send('DOM.setFileInputFiles', { nodeId: input.nodeId, files: ['C:\\Users\\ayush\\Downloads\\10th certificate.pdf'] }); await wait(1000);
+await evaluate(`Array.from(document.querySelectorAll('button')).find(button => button.textContent.includes('Compress to target'))?.click()`); await wait(20000);
+const state = (await evaluate(`({toast:document.querySelector('.toast')?.textContent,progress:document.querySelector('.compression-progress')?.textContent,after:document.querySelector('.compression-meter')?.textContent})`)).result.value;
+console.log(JSON.stringify(state));
+if (!state.after?.includes('Target met')) process.exitCode = 1;
+socket.close();
