@@ -80,16 +80,96 @@ function EmptyCanvas({ onUpload }) {
   </div>;
 }
 
-function PhotoCell({ photo, index, settings, selected, onSelect, onDropPhoto, painterActive }) {
+const defaultStampText = 'Latitude:\nLongitude:\nElevation:\nAccuracy:\nTime:\nNote:';
+
+function createPhotoStamp(photo) {
+  const landscape = (photo?.width || 1) >= (photo?.height || 1);
+  return {
+    enabled: true,
+    text: defaultStampText,
+    x: 0,
+    y: landscape ? 84 : 78,
+    width: landscape ? 22 : 34,
+    height: landscape ? 16 : 20,
+    fontSize: 1.55,
+    lineHeight: 1.08,
+    color: '#111111',
+    background: '#ffffff',
+    backgroundOpacity: 96
+  };
+}
+
+function drawPhotoStamp(ctx, stamp, imageWidth, imageHeight) {
+  if (!stamp?.enabled) return;
+  const box = {
+    x: imageWidth * (stamp.x || 0) / 100,
+    y: imageHeight * (stamp.y || 0) / 100,
+    width: imageWidth * (stamp.width || 22) / 100,
+    height: imageHeight * (stamp.height || 16) / 100
+  };
+  const fontSize = Math.max(7, imageHeight * (stamp.fontSize || 1.55) / 100);
+  const padding = Math.max(2, fontSize * .24);
+  ctx.save();
+  ctx.globalAlpha = Math.max(0, Math.min(100, stamp.backgroundOpacity ?? 96)) / 100;
+  ctx.fillStyle = stamp.background || '#ffffff';
+  ctx.fillRect(box.x, box.y, box.width, box.height);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = stamp.color || '#111111';
+  ctx.font = `${fontSize}px Arial, Helvetica, sans-serif`;
+  ctx.textBaseline = 'top';
+  const lineHeight = fontSize * (stamp.lineHeight || 1.08);
+  const lines = String(stamp.text || '').split(/\r?\n/);
+  lines.forEach((line, index) => {
+    const textY = box.y + padding + index * lineHeight;
+    if (textY + lineHeight <= box.y + box.height + 1) ctx.fillText(line, box.x + padding, textY, Math.max(1, box.width - padding * 2));
+  });
+  ctx.restore();
+}
+
+function PhotoStampOverlay({ photo, selected, onSelect, onUpdateStamp, onBeginStampEdit, onEndStampEdit }) {
+  const stamp = photo?.stamp;
+  if (!stamp?.enabled) return null;
+  const style = {
+    left: `${stamp.x || 0}%`,
+    top: `${stamp.y || 0}%`,
+    width: `${stamp.width || 22}%`,
+    height: `${stamp.height || 16}%`,
+    fontSize: `clamp(7px, ${stamp.fontSize || 1.55}cqh, 30px)`,
+    lineHeight: stamp.lineHeight || 1.08,
+    color: stamp.color || '#111111',
+    backgroundColor: stamp.background || '#ffffff'
+  };
+  return <textarea className={`photo-stamp-editor ${selected ? 'active' : ''}`} value={stamp.text || ''}
+    aria-label="Editable photo writing"
+    readOnly={!selected}
+    tabIndex={selected ? 0 : -1}
+    spellCheck={false}
+    style={style}
+    onPointerDown={event => {
+      event.stopPropagation();
+      onSelect(photo.id, event);
+      const target = event.currentTarget;
+      window.requestAnimationFrame(() => target.focus());
+    }}
+    onClick={event => event.stopPropagation()}
+    onFocus={() => onBeginStampEdit(photo.id)}
+    onBlur={onEndStampEdit}
+    onChange={event => onUpdateStamp(photo.id, { text: event.target.value })} />;
+}
+
+function PhotoCell({ photo, index, settings, selected, onSelect, onDropPhoto, onUpdateStamp = () => {}, onBeginStampEdit = () => {}, onEndStampEdit = () => {}, painterActive }) {
   const [dragging, setDragging] = useState(false);
   const rotation = normalizedRotation(photo?.rotation), quarterTurn = rotation === 90 || rotation === 270;
-  return <button
+  return <div
+    role="button"
+    tabIndex={0}
     className={`photo-cell ${selected ? 'selected' : ''} ${dragging ? 'dragging' : ''}`}
     style={{
       border: settings.border ? `${Math.max(settings.borderWidth, .2)}mm solid #2a2b29` : 'none',
       backgroundColor: settings.background
     }}
     onClick={e => onSelect(photo?.id || null, e)}
+    onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') onSelect(photo?.id || null, e); }}
     onDragOver={e => { e.preventDefault(); setDragging(true); }}
     onDragLeave={() => setDragging(false)}
     onDrop={e => { e.preventDefault(); setDragging(false); onDropPhoto(e.dataTransfer.getData('photoId'), index); }}
@@ -104,13 +184,14 @@ function PhotoCell({ photo, index, settings, selected, onSelect, onDropPhoto, pa
         transform: `${quarterTurn ? 'translate(-50%, -50%) ' : ''}translate(${photo.x || 0}%, ${photo.y || 0}%) scale(${(photo.zoom || 1) * (photo.expandX || 1) * (photo.mirrorX ? -1 : 1)}, ${(photo.zoom || 1) * (photo.expandY || 1) * (photo.mirrorY ? -1 : 1)}) rotate(${photo.rotation || 0}deg)`,
         filter: `brightness(${photo.brightness || 100}%) contrast(${photo.contrast || 100}%) saturate(${photo.saturation || 100}%)`
       }} />
+      <PhotoStampOverlay photo={photo} selected={selected} onSelect={onSelect} onUpdateStamp={onUpdateStamp} onBeginStampEdit={onBeginStampEdit} onEndStampEdit={onEndStampEdit} />
       <span className="cell-number">{index + 1}</span>
       {painterActive && <span className="paint-target"><Paintbrush size={13} /> Apply format</span>}
     </> : <span className="empty-cell"><Plus size={15} /> Empty</span>}
-  </button>;
+  </div>;
 }
 
-function PhotoEditorPanel({ photo, selectedCount, onUpdate, onDelete, onDuplicate, onCopyFormat, onSmartExpand, onSmartExpandAll, painterActive }) {
+function PhotoEditorPanel({ photo, selectedCount, onUpdate, onDelete, onDuplicate, onCopyFormat, onSmartExpand, onSmartExpandAll, onEnableStamp, onDisableStamp, painterActive }) {
   const [autoRotate, setAutoRotate] = useState(true);
   if (!photo) return <div className="selection-empty">
     <Crop size={22} />
@@ -131,6 +212,25 @@ function PhotoEditorPanel({ photo, selectedCount, onUpdate, onDelete, onDuplicat
       { value: 'cover', label: 'Fill' }, { value: 'contain', label: 'Fit' }
     ]} />
     <div className="smart-expand-card"><button className="primary smart-expand-button" onClick={() => onSmartExpand(autoRotate)}><Maximize2 size={15} /> Smart Expand {selectedCount > 1 ? `(${selectedCount})` : ''}</button><label><input type="checkbox" checked={autoRotate} onChange={event => setAutoRotate(event.target.checked)} /><span><strong>Allow auto-rotation</strong><small>Rotate 90° only when it fills the cell better</small></span></label><button className="text-button" onClick={() => onSmartExpandAll(autoRotate)}>Apply to all photos</button></div>
+    <div className="photo-stamp-card">
+      <button className={`${photo.stamp?.enabled ? 'secondary' : 'primary'} full`} onClick={onEnableStamp}><FileText size={15} /> {photo.stamp?.enabled ? 'Refresh writing box' : 'Edit photo writing'}</button>
+      {photo.stamp?.enabled && <>
+        <textarea value={photo.stamp.text || ''} spellCheck={false} aria-label="Photo writing text" onChange={event => onUpdate({ stamp: { ...photo.stamp, text: event.target.value } })} />
+        <div className="stamp-grid">
+          <NumberInput label="X" value={photo.stamp.x || 0} min={0} max={95} suffix="%" onChange={x => onUpdate({ stamp: { ...photo.stamp, x } })} />
+          <NumberInput label="Y" value={photo.stamp.y || 0} min={0} max={95} suffix="%" onChange={y => onUpdate({ stamp: { ...photo.stamp, y } })} />
+          <NumberInput label="Width" value={photo.stamp.width || 22} min={5} max={100} suffix="%" onChange={width => onUpdate({ stamp: { ...photo.stamp, width } })} />
+          <NumberInput label="Height" value={photo.stamp.height || 16} min={4} max={100} suffix="%" onChange={height => onUpdate({ stamp: { ...photo.stamp, height } })} />
+        </div>
+        <div className="stamp-grid">
+          <NumberInput label="Font" value={photo.stamp.fontSize || 1.55} min={.5} max={6} step={.05} suffix="%" onChange={fontSize => onUpdate({ stamp: { ...photo.stamp, fontSize } })} />
+          <NumberInput label="Line height" value={photo.stamp.lineHeight || 1.08} min={.8} max={2} step={.05} suffix="" onChange={lineHeight => onUpdate({ stamp: { ...photo.stamp, lineHeight } })} />
+          <NumberInput label="Patch" value={photo.stamp.backgroundOpacity ?? 96} min={0} max={100} suffix="%" onChange={backgroundOpacity => onUpdate({ stamp: { ...photo.stamp, backgroundOpacity } })} />
+        </div>
+        <div className="stamp-colors"><label>Text<input type="color" value={photo.stamp.color || '#111111'} onChange={event => onUpdate({ stamp: { ...photo.stamp, color: event.target.value } })} /></label><label>Patch<input type="color" value={photo.stamp.background || '#ffffff'} onChange={event => onUpdate({ stamp: { ...photo.stamp, background: event.target.value } })} /></label></div>
+        <button className="text-button danger-text" onClick={onDisableStamp}>Remove writing box</button>
+      </>}
+    </div>
     {slider('Zoom', 'zoom', 1, 3, .05, v => `${Math.round(v * 100)}%`)}
     {slider('Horizontal', 'x', -50, 50, 1, v => `${v}%`)}
     {slider('Vertical', 'y', -50, 50, 1, v => `${v}%`)}
@@ -178,6 +278,7 @@ function PhotoWorkspace() {
   const [page, setPage] = useState(0);
   const [zoom, setZoom] = useState(74);
   const [assetDropIndex, setAssetDropIndex] = useState(null);
+  const [stampEditingId, setStampEditingId] = useState(null);
   const [leftOpen, setLeftOpen] = useState(true);
   const [rightTab, setRightTab] = useState('layout');
   const [toast, setToast] = useState('');
@@ -302,6 +403,25 @@ function PhotoWorkspace() {
     checkpoint();
     setPhotos(ps => ps.map(p => selectedIds.includes(p.id) ? { ...p, ...patch } : p));
   };
+  const enableStamp = () => {
+    if (!selectedIds.length) return;
+    checkpoint();
+    setPhotos(current => current.map(photo => selectedIds.includes(photo.id) ? { ...photo, stamp: { ...(photo.stamp || createPhotoStamp(photo)), enabled: true } } : photo));
+    flash(selectedIds.length > 1 ? `Writing boxes ready on ${selectedIds.length} photos` : 'Writing box ready - click it on the photo');
+  };
+  const disableStamp = () => {
+    if (!selectedIds.length) return;
+    checkpoint();
+    setPhotos(current => current.map(photo => selectedIds.includes(photo.id) && photo.stamp ? { ...photo, stamp: { ...photo.stamp, enabled: false } } : photo));
+    flash('Writing box removed');
+  };
+  const updatePhotoStamp = (id, patch) => setPhotos(current => current.map(photo => photo.id === id ? { ...photo, stamp: { ...(photo.stamp || createPhotoStamp(photo)), ...patch, enabled: true } } : photo));
+  const beginStampEdit = id => {
+    if (!id || stampEditingId === id) return;
+    checkpoint();
+    setStampEditingId(id);
+  };
+  const endStampEdit = () => setStampEditingId(null);
   const smartExpand = (ids, autoRotate) => {
     if (!ids.length) return;
     const cellW = settings.fixedSize ? settings.photoWidth : (usableWidth - settings.gapX * (effectiveCols - 1)) / effectiveCols;
@@ -391,15 +511,21 @@ function PhotoWorkspace() {
     const img = new Image();
     img.onload = () => {
       const angle = normalizedRotation(photo.rotation), radians = angle * Math.PI / 180;
-      const dimensions = rotatedDimensions(img.naturalWidth, img.naturalHeight, angle);
+      const source = document.createElement('canvas');
+      source.width = img.naturalWidth; source.height = img.naturalHeight;
+      const sourceContext = source.getContext('2d');
+      sourceContext.filter = `brightness(${photo.brightness}%) contrast(${photo.contrast}%) saturate(${photo.saturation}%)`;
+      sourceContext.drawImage(img, 0, 0);
+      sourceContext.filter = 'none';
+      drawPhotoStamp(sourceContext, photo.stamp, source.width, source.height);
+      const dimensions = rotatedDimensions(source.width, source.height, angle);
       canvas.width = dimensions.width; canvas.height = dimensions.height;
       const c = canvas.getContext('2d');
-      c.filter = `brightness(${photo.brightness}%) contrast(${photo.contrast}%) saturate(${photo.saturation}%)`;
       c.save();
       c.translate(canvas.width / 2, canvas.height / 2);
       c.rotate(radians);
       c.scale(photo.mirrorX ? -1 : 1, photo.mirrorY ? -1 : 1);
-      c.drawImage(img, -img.naturalWidth / 2, -img.naturalHeight / 2);
+      c.drawImage(source, -source.width / 2, -source.height / 2);
       c.restore();
       resolve({ dataUrl: canvas.toDataURL('image/png'), width: canvas.width, height: canvas.height });
     };
@@ -525,7 +651,8 @@ function PhotoWorkspace() {
                 settings={settings} selected={selectedIds.includes(pagePhotos[i]?.id)}
                 painterActive={Boolean(paintFormat && pagePhotos[i])}
                 onSelect={selectPhoto}
-                onDropPhoto={(id, idx) => movePhoto(id, page * perPage + idx)} />)}
+                onDropPhoto={(id, idx) => movePhoto(id, page * perPage + idx)}
+                onUpdateStamp={updatePhotoStamp} onBeginStampEdit={beginStampEdit} onEndStampEdit={endStampEdit} />)}
             </div>
             {!photos.length && <EmptyCanvas onUpload={() => fileRef.current.click()} />}
           </div>
@@ -545,7 +672,8 @@ function PhotoWorkspace() {
               columnGap: `${settings.gapX}mm`, rowGap: `${settings.gapY}mm`
             }}>
               {Array.from({ length: perPage }).map((__, index) => <PhotoCell key={index} photo={printPhotos[index]} index={index}
-                settings={settings} selected={false} painterActive={false} onSelect={() => {}} onDropPhoto={() => {}} />)}
+                settings={settings} selected={false} painterActive={false} onSelect={() => {}} onDropPhoto={() => {}}
+                onUpdateStamp={() => {}} onBeginStampEdit={() => {}} onEndStampEdit={() => {}} />)}
             </div>
           </div>;
         })}
@@ -633,7 +761,7 @@ function PhotoWorkspace() {
             <input type="checkbox" checked={settings.border} onChange={e => changeSettings(s => ({ ...s, border: e.target.checked }))} /><i /></label>
         </section>
         <div className="print-note"><Printer size={17} /><div><strong>Print at actual size</strong><p>Choose “Actual size” or “100%” in your printer dialog for precise dimensions.</p></div></div>
-      </div> : <div className="settings-content"><PhotoEditorPanel photo={selected} selectedCount={selectedIds.length} onUpdate={updateSelected} onDelete={removeSelected} onDuplicate={duplicateSelected} onCopyFormat={copyFormat} onSmartExpand={autoRotate => smartExpand(selectedIds, autoRotate)} onSmartExpandAll={autoRotate => smartExpand(photos.map(photo => photo.id), autoRotate)} painterActive={Boolean(paintFormat)} /></div>}
+      </div> : <div className="settings-content"><PhotoEditorPanel photo={selected} selectedCount={selectedIds.length} onUpdate={updateSelected} onDelete={removeSelected} onDuplicate={duplicateSelected} onCopyFormat={copyFormat} onSmartExpand={autoRotate => smartExpand(selectedIds, autoRotate)} onSmartExpandAll={autoRotate => smartExpand(photos.map(photo => photo.id), autoRotate)} onEnableStamp={enableStamp} onDisableStamp={disableStamp} painterActive={Boolean(paintFormat)} /></div>}
     </aside>
     <Toast message={toast} />
   </div>;
