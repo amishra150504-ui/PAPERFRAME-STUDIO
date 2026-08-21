@@ -18,8 +18,10 @@ import { clearAutosave, loadAutosave, saveAutosave } from './projectStore';
 import { convertPdf, countSelectedPages, downloadOutputs } from './pdfConverters';
 import { acceptedInput, convertInputToPdf } from './officeToPdf';
 import { fitImageRect, normalizedRotation, rotatedDimensions, smartExpandSettings } from './photoLayout';
+import packageInfo from '../package.json';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+const APP_VERSION = packageInfo.version;
 
 const pdfJsDocumentCache = new WeakMap();
 function getPdfJsDocument(item) {
@@ -2076,6 +2078,18 @@ function PhotoTools() {
     setPhotos(current => [...current, ...loaded]);
     if (loaded.length) { setSelectedId(current => current || loaded[0].id); notify(`${loaded.length} photo${loaded.length > 1 ? 's' : ''} added to Photo Tools`); }
   };
+  const deletePhoto = id => {
+    const target = photos.find(entry => entry.id === id);
+    setPhotos(current => {
+      const remaining = current.filter(entry => entry.id !== id);
+      if (selectedId === id) setSelectedId(remaining[0]?.id || null);
+      return remaining;
+    });
+    setBoxes(current => { const next = { ...current }; delete next[id]; return next; });
+    if (selectedId === id) setSelectedBoxId(null);
+    if (target?.url) URL.revokeObjectURL(target.url);
+    notify('Photo removed');
+  };
   const updateBox = (id, patch, makeCheckpoint = true) => {
     if (!photo) return;
     if (makeCheckpoint) checkpoint();
@@ -2104,22 +2118,40 @@ function PhotoTools() {
     const red = parseInt(full.slice(0, 2), 16) || 255, green = parseInt(full.slice(2, 4), 16) || 255, blue = parseInt(full.slice(4, 6), 16) || 255;
     return `rgba(${red}, ${green}, ${blue}, ${Math.max(0, Math.min(100, opacity ?? 92)) / 100})`;
   };
+  const locateWhiteInfoPanel = () => {
+    if (!photo || !imageRef.current) return null;
+    const canvas = document.createElement('canvas'); canvas.width = photo.width; canvas.height = photo.height;
+    const context = canvas.getContext('2d', { willReadFrequently: true }); context.drawImage(imageRef.current, 0, 0, photo.width, photo.height);
+    const startY = Math.floor(photo.height * .42), endX = Math.floor(photo.width * .62), pixels = context.getImageData(0, startY, endX, photo.height - startY).data;
+    let minX = endX, minY = photo.height, maxX = 0, maxY = 0, hits = 0;
+    for (let y = 0; y < photo.height - startY; y += 2) for (let x = 0; x < endX; x += 2) {
+      const index = (y * endX + x) * 4, red = pixels[index], green = pixels[index + 1], blue = pixels[index + 2];
+      if (red > 225 && green > 225 && blue > 225 && Math.max(red, green, blue) - Math.min(red, green, blue) < 30) { minX = Math.min(minX, x); minY = Math.min(minY, y + startY); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y + startY); hits++; }
+    }
+    if (hits < 40 || maxX - minX < 35 || maxY - minY < 14) return null;
+    const padding = 5;
+    return { x: Math.max(0, minX - padding), y: Math.max(0, minY - padding), width: Math.min(photo.width, maxX - minX + padding * 2), height: Math.min(photo.height, maxY - minY + padding * 2) };
+  };
   const runOcr = async () => {
     if (!photo || !imageRef.current) return;
     setOcrProgress(1);
     try {
+      const panel = locateWhiteInfoPanel(), sourceCanvas = document.createElement('canvas');
+      sourceCanvas.width = panel?.width || photo.width; sourceCanvas.height = panel?.height || photo.height;
+      sourceCanvas.getContext('2d').drawImage(imageRef.current, panel?.x || 0, panel?.y || 0, panel?.width || photo.width, panel?.height || photo.height, 0, 0, sourceCanvas.width, sourceCanvas.height);
       const { createWorker } = await import('tesseract.js');
       const worker = await createWorker(ocrLanguage, 1, { logger: message => message.status === 'recognizing text' && setOcrProgress(Math.max(1, Math.round(message.progress * 100))) });
-      const result = await worker.recognize(imageRef.current, {}, { blocks: true }), lines = [];
+      await worker.setParameters({ tessedit_pageseg_mode: '6' });
+      const result = await worker.recognize(sourceCanvas, {}, { blocks: true }), lines = [];
       (result.data.blocks || []).forEach(block => (block.paragraphs || []).forEach(paragraph => (paragraph.lines || []).forEach(line => line.text?.trim() && line.bbox && lines.push(line))));
       if (!lines.length) (result.data.words || []).forEach(word => word.text?.trim() && word.bbox && lines.push(word));
       checkpoint();
       const detected = lines.map((line, index) => {
-        const box = line.bbox, height = Math.max(1, (box.y1 - box.y0) / photo.height * 100);
-        return { id: crypto.randomUUID(), text: line.text.trim(), originalText: line.text.trim(), x: box.x0 / photo.width * 100, y: box.y0 / photo.height * 100, width: Math.max(5, (box.x1 - box.x0) / photo.width * 100), height: Math.max(3.5, height * 1.32), fontSize: Math.max(1, Math.min(6, height * .94)), lineHeight: 1.08, color: '#111111', background: '#ffffff', backgroundOpacity: 88, font: 'Arial', align: 'left', source: 'ocr', confidence: Math.round(line.confidence || 0) };
+        const box = line.bbox, x = box.x0 + (panel?.x || 0), y = box.y0 + (panel?.y || 0), height = Math.max(1, (box.y1 - box.y0) / photo.height * 100);
+        return { id: crypto.randomUUID(), text: line.text.trim(), originalText: line.text.trim(), x: x / photo.width * 100, y: y / photo.height * 100, width: Math.max(5, (box.x1 - box.x0) / photo.width * 100), height: Math.max(3.5, height * 1.32), fontSize: Math.max(1, Math.min(4, height * .94)), lineHeight: 1.08, color: '#111111', background: '#ffffff', backgroundOpacity: 92, font: 'Arial', align: 'left', source: 'ocr', confidence: Math.round(line.confidence || 0) };
       });
       setBoxes(current => ({ ...current, [photo.id]: detected })); setSelectedBoxId(detected[0]?.id || null);
-      await worker.terminate(); notify(detected.length ? `${detected.length} text areas are ready to edit` : 'OCR could not find readable text');
+      await worker.terminate(); notify(detected.length ? `${detected.length} text areas found${panel ? ' in the white information panel' : ''}` : 'OCR could not find readable text');
     } catch (error) { console.error(error); notify('OCR failed. Try a clearer image or another language.'); }
     setOcrProgress(null);
   };
@@ -2154,9 +2186,9 @@ function PhotoTools() {
     catch (error) { notify(error.message || 'Could not export PDF'); }
   };
   return <div className="photo-text-editor"><input ref={inputRef} hidden type="file" multiple accept="image/*" onChange={event => addPhotos(event.target.files)} />
-    <aside className="photo-text-assets"><div className="photo-text-panel-title"><span><small>PHOTO TOOLS</small><strong>Text editor</strong></span><button className="secondary compact" onClick={() => inputRef.current.click()}><Upload size={14} /> Add photos</button></div><div className="photo-text-assets-list">{photos.map(entry => <button key={entry.id} className={entry.id === selectedId ? 'selected' : ''} onClick={() => { setSelectedId(entry.id); setSelectedBoxId(null); }}><img src={entry.url} alt="" /><span><strong>{entry.name}</strong><small>{(boxesByPhoto[entry.id] || []).length} text box{(boxesByPhoto[entry.id] || []).length === 1 ? '' : 'es'}</small></span></button>)}{!photos.length && <button className="photo-text-drop" onClick={() => inputRef.current.click()}><Upload size={24} /><strong>Open photos</strong><small>Drop images here or browse</small></button>}</div></aside>
+    <aside className="photo-text-assets"><div className="photo-text-panel-title"><span><small>PHOTO TOOLS</small><strong>Text editor</strong></span><button className="secondary compact" onClick={() => inputRef.current.click()}><Upload size={14} /> Add photos</button></div><div className="photo-text-assets-list">{photos.map(entry => <div key={entry.id} role="button" tabIndex={0} className={`photo-text-asset ${entry.id === selectedId ? 'selected' : ''}`} onClick={() => { setSelectedId(entry.id); setSelectedBoxId(null); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { setSelectedId(entry.id); setSelectedBoxId(null); } }}><img src={entry.url} alt="" /><span><strong>{entry.name}</strong><small>{(boxesByPhoto[entry.id] || []).length} text box{(boxesByPhoto[entry.id] || []).length === 1 ? '' : 'es'}</small></span><IconButton label="Delete photo" className="danger" onClick={event => { event.stopPropagation(); deletePhoto(entry.id); }}><Trash2 size={14} /></IconButton></div>)}{!photos.length && <button className="photo-text-drop" onClick={() => inputRef.current.click()} onDragOver={event => event.preventDefault()} onDrop={event => { event.preventDefault(); addPhotos(event.dataTransfer.files); }}><Upload size={24} /><strong>Open photos</strong><small>Drop images here or browse</small></button>}</div></aside>
     <main className="photo-text-main"><div className="photo-text-toolbar"><div className="photo-text-document"><FileImage size={16} /><span><strong>{photo?.name || 'No photo open'}</strong><small>{photo ? `${photo.width} × ${photo.height} px` : 'Files stay on this device'}</small></span></div><div className="photo-text-actions"><IconButton label="Undo" disabled={!history.length} onClick={undo}><Undo2 size={16} /></IconButton><IconButton label="Redo" disabled={!future.length} onClick={redo}><Redo2 size={16} /></IconButton><span className="vline" /><button className="secondary" disabled={!photo || ocrProgress !== null} onClick={runOcr}>{ocrProgress !== null ? <><LoaderCircle className="spin" size={14} /> {ocrProgress}%</> : <><FileText size={14} /> Detect text</>}</button><button className="secondary" disabled={!photo} onClick={addText}><Plus size={15} /> Add text</button><button className="secondary" disabled={!selectedBox} onClick={deleteSelected}><Trash2 size={14} /> Delete</button></div></div>
-      <div className="photo-text-stage">{photo ? <div className="photo-text-canvas" style={{ aspectRatio: `${photo.width}/${photo.height}` }}><img ref={imageRef} src={photo.url} alt="Editable source" />{boxes.map(box => <textarea key={box.id} value={box.text} spellCheck={false} className={box.id === selectedBoxId ? 'selected' : ''} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.width}%`, height: `${box.height}%`, fontSize: `clamp(8px, ${box.fontSize}cqh, 56px)`, lineHeight: box.lineHeight, color: box.color, fontFamily: box.font, textAlign: box.align, backgroundColor: hexRgba(box.background, box.backgroundOpacity) }} onPointerDown={event => { event.stopPropagation(); startTextEdit(box.id); const target = event.currentTarget; window.requestAnimationFrame(() => target.focus()); }} onFocus={() => startTextEdit(box.id)} onBlur={() => setEditingId(null)} onChange={event => updateBox(box.id, { text: event.target.value }, false)} />)}</div> : <div className="photo-text-empty"><ImageIcon size={34} /><strong>Open a photo to edit its writing</strong><p>Use OCR to detect writing, or add a text box yourself.</p><button className="primary" onClick={() => inputRef.current.click()}><Upload size={16} /> Choose photos</button></div>}</div>
+      <div className="photo-text-stage">{photo ? <div className="photo-text-canvas" style={{ aspectRatio: `${photo.width}/${photo.height}` }}><img ref={imageRef} src={photo.url} alt="Editable source" />{boxes.map(box => { const isEditing = editingId === box.id || box.source !== 'ocr' || box.text !== box.originalText; return <textarea key={box.id} value={box.text} spellCheck={false} className={box.id === selectedBoxId ? 'selected' : ''} style={{ left: `${box.x}%`, top: `${box.y}%`, width: `${box.width}%`, height: `${box.height}%`, fontSize: `clamp(8px, ${box.fontSize}cqh, 56px)`, lineHeight: box.lineHeight, color: isEditing ? box.color : 'transparent', fontFamily: box.font, textAlign: box.align, backgroundColor: isEditing ? hexRgba(box.background, box.backgroundOpacity) : 'transparent' }} onPointerDown={event => { event.stopPropagation(); startTextEdit(box.id); const target = event.currentTarget; window.requestAnimationFrame(() => target.focus()); }} onFocus={() => startTextEdit(box.id)} onBlur={() => setEditingId(null)} onChange={event => updateBox(box.id, { text: event.target.value }, false)} />; })}</div> : <div className="photo-text-empty"><ImageIcon size={34} /><strong>Open a photo to edit its writing</strong><p>Use OCR to detect writing, or add a text box yourself.</p><button className="primary" onClick={() => inputRef.current.click()}><Upload size={16} /> Choose photos</button></div>}</div>
     </main>
     <aside className="photo-text-properties"><div className="photo-text-property-tabs"><button className="active">Format</button><button onClick={runOcr} disabled={!photo || ocrProgress !== null}>OCR</button><button disabled={!photo} onClick={exportPdf}>Export</button></div>{selectedBox ? <div className="photo-text-property-body"><small>{selectedBox.source === 'ocr' ? `OCR TEXT · ${selectedBox.confidence || 0}%` : 'TEXT BOX'}</small><label>Text<textarea value={selectedBox.text} onFocus={() => startTextEdit(selectedBox.id)} onBlur={() => setEditingId(null)} onChange={event => updateBox(selectedBox.id, { text: event.target.value }, false)} /></label><label>Font<select value={selectedBox.font} onChange={event => updateBox(selectedBox.id, { font: event.target.value })}><option>Arial</option><option>Helvetica</option><option>Times New Roman</option><option>Courier New</option><option>Georgia</option></select></label><div className="photo-text-field-grid"><NumberInput label="X" value={selectedBox.x} min={0} max={95} suffix="%" onChange={x => updateBox(selectedBox.id, { x })} /><NumberInput label="Y" value={selectedBox.y} min={0} max={95} suffix="%" onChange={y => updateBox(selectedBox.id, { y })} /><NumberInput label="Width" value={selectedBox.width} min={3} max={100} suffix="%" onChange={width => updateBox(selectedBox.id, { width })} /><NumberInput label="Height" value={selectedBox.height} min={3} max={100} suffix="%" onChange={height => updateBox(selectedBox.id, { height })} /><NumberInput label="Font size" value={selectedBox.fontSize} min={.5} max={8} step={.05} suffix="%" onChange={fontSize => updateBox(selectedBox.id, { fontSize })} /><NumberInput label="Patch" value={selectedBox.backgroundOpacity} min={0} max={100} suffix="%" onChange={backgroundOpacity => updateBox(selectedBox.id, { backgroundOpacity })} /></div><div className="photo-text-colors"><label>Text colour<input type="color" value={selectedBox.color} onChange={event => updateBox(selectedBox.id, { color: event.target.value })} /></label><label>Patch colour<input type="color" value={selectedBox.background} onChange={event => updateBox(selectedBox.id, { background: event.target.value })} /></label></div><label>Alignment<select value={selectedBox.align} onChange={event => updateBox(selectedBox.id, { align: event.target.value })}><option value="left">Left</option><option value="center">Centre</option><option value="right">Right</option></select></label><button className="secondary full" onClick={sampleBackground}><Sparkles size={14} /> Sample background patch</button></div> : <div className="photo-text-property-empty"><Settings2 size={22} /><strong>Select or detect text</strong><p>Click a text box on the image, use Detect text, or add a new text box.</p></div>}<div className="photo-text-export"><small>EXPORT EDITED PHOTO</small><button className="primary full" disabled={!photo} onClick={() => exportImage('jpg')}><Download size={15} /> Download JPG</button><button className="secondary full" disabled={!photo} onClick={() => exportImage('png')}><Download size={15} /> Download PNG</button><button className="secondary full" disabled={!photo} onClick={exportPdf}><FileText size={15} /> Download PDF</button></div></aside><Toast message={toast} /></div>;
 }
@@ -2195,7 +2227,7 @@ function App() {
   };
   return <div className="app">
     <header className="app-header">
-      <button className="brand" onClick={() => setMode('photos')}><span className="brand-mark"><img src="/assets/paperframe-header.png" alt="" /></span><span>Paperframe<small>STUDIO</small></span></button>
+      <button className="brand" onClick={() => setMode('photos')}><span className="brand-mark"><img src="/assets/paperframe-header.png" alt="" /></span><span>Paperframe<small>STUDIO</small></span><em className="app-version">v{APP_VERSION}</em></button>
       <nav>
         <button className={mode === 'photos' ? 'active' : ''} onClick={() => setMode('photos')}><Grid2X2 size={16} /> Photo layout</button>
         <button className={mode === 'tools' ? 'active' : ''} onClick={() => setMode('tools')}><ImageIcon size={16} /> Photo tools</button>
