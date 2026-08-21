@@ -838,11 +838,12 @@ function MergePdfLegacy() {
 }
 
 const prettyBytes = size => size < 1048576 ? `${(size / 1024).toFixed(1)} KB` : `${(size / 1048576).toFixed(1)} MB`;
-const savePdf = (bytes, name) => {
-  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+const saveBlob = (blob, name) => {
+  const url = URL.createObjectURL(blob);
   const link = document.createElement('a'); link.href = url; link.download = name; link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1200);
 };
+const savePdf = (bytes, name) => saveBlob(new Blob([bytes], { type: 'application/pdf' }), name);
 const loadPdfItem = async file => {
   const originalBytes = new Uint8Array(await file.arrayBuffer());
   try {
@@ -914,35 +915,121 @@ function MergeTool({ notify }) {
 }
 
 function SplitTool({ notify }) {
-  const [item, setItem] = useState(null), [range, setRange] = useState('1'), [busy, setBusy] = useState(false);
-  const add = async files => { try { const loaded = await loadPdfItem(files[0]); setItem(loaded); setRange(`1-${loaded.pages}`); if (loaded.repaired) notify('Incomplete image-only PDF repaired automatically'); } catch { notify('Could not read this PDF'); } };
-  const getPages = () => {
-    const found = new Set();
-    range.split(',').forEach(part => {
-      const token = part.trim(); if (!token) return;
-      if (token.includes('-')) { const [a, b] = token.split('-').map(Number); if (!a || !b || a > b) throw Error('Invalid range'); for (let p = a; p <= b; p++) found.add(p); }
-      else { const p = Number(token); if (!p) throw Error('Invalid page'); found.add(p); }
-    });
-    const pages = [...found]; if (!pages.length || pages.some(p => p < 1 || p > item.pages)) throw Error(`Use pages from 1 to ${item.pages}`); return pages;
+  const [item, setItem] = useState(null), [range, setRange] = useState('1'), [selectedPages, setSelectedPages] = useState(new Set());
+  const [mode, setMode] = useState('extract'), [chunkSize, setChunkSize] = useState(1), [customSets, setCustomSets] = useState('1-2 | 3-4');
+  const [busy, setBusy] = useState(false), [progress, setProgress] = useState('');
+  const baseName = item?.name.replace(/\.pdf$/i, '') || 'paperframe';
+  const formatPages = pages => {
+    const sorted = [...new Set(pages)].sort((a, b) => a - b), segments = [];
+    for (let index = 0; index < sorted.length;) {
+      let end = index; while (end + 1 < sorted.length && sorted[end + 1] === sorted[end] + 1) end++;
+      segments.push(end === index ? String(sorted[index]) : `${sorted[index]}-${sorted[end]}`); index = end + 1;
+    }
+    return segments.join(', ');
   };
-  const split = async separate => {
-    setBusy(true);
+  const parseRange = value => {
+    if (!item) return [];
+    const found = new Set();
+    value.split(',').forEach(part => {
+      const token = part.trim(); if (!token) return;
+      if (!/^\d+(?:\s*-\s*\d+)?$/.test(token)) throw Error('Use page numbers such as 1-3, 5, 8-10');
+      const [start, end = start] = token.split('-').map(value => Number(value.trim()));
+      if (!start || !end || start > end || end > item.pages) throw Error(`Use pages from 1 to ${item.pages}`);
+      for (let number = start; number <= end; number++) found.add(number);
+    });
+    const pages = [...found].sort((a, b) => a - b);
+    if (!pages.length) throw Error('Select at least one page');
+    return pages;
+  };
+  const applyRange = () => {
+    try { const pages = parseRange(range); setSelectedPages(new Set(pages)); setRange(formatPages(pages)); notify(`${pages.length} page${pages.length > 1 ? 's' : ''} selected`); }
+    catch (error) { notify(error.message); }
+  };
+  const setQuickSelection = kind => {
+    const pages = Array.from({ length: item.pages }, (_, index) => index + 1).filter(number => kind === 'all' || (kind === 'odd' ? number % 2 : number % 2 === 0));
+    setSelectedPages(new Set(pages)); setRange(formatPages(pages));
+  };
+  const togglePage = number => setSelectedPages(current => {
+    const next = new Set(current); if (next.has(number)) next.delete(number); else next.add(number);
+    setRange(formatPages([...next])); return next;
+  });
+  const createPdf = async (source, numbers) => {
+    const out = await PDFDocument.create(), copied = await out.copyPages(source, numbers.map(number => number - 1));
+    copied.forEach(page => out.addPage(page));
+    return out.save({ useObjectStreams: true });
+  };
+  const downloadArchive = async (outputs, name) => {
+    const { default: JSZip } = await import('jszip'), archive = new JSZip();
+    outputs.forEach(output => archive.file(output.name, output.bytes));
+    saveBlob(await archive.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } }), name);
+  };
+  const split = async () => {
+    setBusy(true); setProgress('Preparing your PDFs...');
     try {
-      const chosen = getPages(), source = await PDFDocument.load(item.bytes);
-      if (separate) for (const number of chosen) {
-        const out = await PDFDocument.create(), [page] = await out.copyPages(source, [number - 1]); out.addPage(page);
-        savePdf(await out.save({ useObjectStreams: true }), `${item.name.replace(/\.pdf$/i, '')}-page-${number}.pdf`);
+      const chosen = [...selectedPages].sort((a, b) => a - b);
+      if (!chosen.length && (mode === 'extract' || mode === 'individual')) throw Error('Select at least one page');
+      const source = await PDFDocument.load(item.bytes);
+      if (mode === 'extract') {
+        setProgress('Creating selected-pages PDF...');
+        savePdf(await createPdf(source, chosen), `${baseName}-pages-${formatPages(chosen).replace(/[ ,]/g, '_')}.pdf`);
+        notify(`Extracted ${chosen.length} page${chosen.length > 1 ? 's' : ''} into one PDF`);
+      } else if (mode === 'individual') {
+        const width = String(item.pages).length, outputs = [];
+        for (let index = 0; index < chosen.length; index++) {
+          const number = chosen[index]; setProgress(`Creating page ${index + 1} of ${chosen.length}...`);
+          outputs.push({ name: `${baseName}-page-${String(number).padStart(width, '0')}.pdf`, bytes: await createPdf(source, [number]) });
+        }
+        await downloadArchive(outputs, `${baseName}-separate-pages.zip`);
+        notify(`${outputs.length} separate PDFs downloaded in one ZIP`);
+      } else if (mode === 'chunks') {
+        const size = Math.max(1, Math.min(item.pages, Number(chunkSize) || 1)), all = Array.from({ length: item.pages }, (_, index) => index + 1), outputs = [];
+        for (let start = 0; start < all.length; start += size) {
+          const group = all.slice(start, start + size); setProgress(`Creating set ${outputs.length + 1} of ${Math.ceil(all.length / size)}...`);
+          outputs.push({ name: `${baseName}-pages-${group[0]}-${group[group.length - 1]}.pdf`, bytes: await createPdf(source, group) });
+        }
+        await downloadArchive(outputs, `${baseName}-split-every-${size}-pages.zip`);
+        notify(`${outputs.length} PDF sets downloaded in one ZIP`);
       } else {
-        const out = await PDFDocument.create(), pages = await out.copyPages(source, chosen.map(p => p - 1)); pages.forEach(p => out.addPage(p));
-        savePdf(await out.save({ useObjectStreams: true }), `${item.name.replace(/\.pdf$/i, '')}-extracted.pdf`);
+        const groups = customSets.split('|').map(value => parseRange(value.trim())), outputs = [];
+        for (let index = 0; index < groups.length; index++) {
+          const group = groups[index]; setProgress(`Creating custom set ${index + 1} of ${groups.length}...`);
+          outputs.push({ name: `${baseName}-set-${String(index + 1).padStart(2, '0')}-pages-${formatPages(group).replace(/[ ,]/g, '_')}.pdf`, bytes: await createPdf(source, group) });
+        }
+        await downloadArchive(outputs, `${baseName}-custom-sets.zip`);
+        notify(`${outputs.length} custom PDF sets downloaded in one ZIP`);
       }
-      notify(separate ? 'Individual page PDFs created' : 'Selected pages extracted');
-    } catch (error) { notify(error.message); } setBusy(false);
+    } catch (error) { notify(error.message || 'Could not split this PDF'); }
+    setProgress(''); setBusy(false);
+  };
+  const reset = () => { setItem(null); setSelectedPages(new Set()); setProgress(''); };
+  const add = async files => {
+    try {
+      const loaded = await loadPdfItem(files[0]), pages = Array.from({ length: loaded.pages }, (_, index) => index + 1), halfway = Math.ceil(loaded.pages / 2);
+      setItem(loaded); setSelectedPages(new Set(pages)); setRange(formatPages(pages)); setCustomSets(loaded.pages > 1 ? `1-${halfway} | ${halfway + 1}-${loaded.pages}` : '1');
+      if (loaded.repaired) notify('Incomplete image-only PDF repaired automatically');
+    } catch { notify('Could not read this PDF'); }
   };
   if (!item) return <ToolDrop title="Drop one PDF to split" onFiles={add} />;
-  return <div className="tool-workarea"><DocumentBar item={item} icon={<Scissors size={24} />} onReplace={() => setItem(null)} />
-    <label className="pdf-tool-field"><span>Pages or ranges</span><input value={range} onChange={e => setRange(e.target.value)} placeholder="1-3, 5, 8-10" /><small>Example: 1-3, 5, 8-10</small></label>
-    <div className="tool-button-row"><button className="primary" disabled={busy} onClick={() => split(false)}><Download size={16} /> Extract as one PDF</button><button className="secondary" disabled={busy} onClick={() => split(true)}><Scissors size={16} /> One PDF per page</button></div></div>;
+  const selectedCount = selectedPages.size, modeInfo = {
+    extract: ['Extract selected pages', 'One clean PDF containing your selected pages.'],
+    individual: ['Create one PDF per selected page', 'All files are packed into one ZIP download.'],
+    chunks: ['Split the full PDF into equal sets', 'Every page is included, grouped by your chosen set size.'],
+    custom: ['Create custom page sets', 'Use | to separate PDF sets; each set supports normal ranges.']
+  }[mode];
+  return <div className="tool-workarea split-workarea"><DocumentBar item={item} icon={<Scissors size={24} />} onReplace={reset} />
+    <div className="split-mode-grid">{[
+      ['extract', 'Extract', 'One PDF from selected pages'], ['individual', 'Separate pages', 'One PDF for each selected page'],
+      ['chunks', 'Every N pages', 'Split the complete PDF into sets'], ['custom', 'Custom sets', 'Define several page groups']
+    ].map(([id, title, description]) => <button key={id} className={mode === id ? 'selected' : ''} disabled={busy} onClick={() => setMode(id)}><strong>{title}</strong><small>{description}</small></button>)}</div>
+    <div className="split-selection-heading"><div><strong>Page selection</strong><small>{selectedCount} of {item.pages} pages selected</small></div><div><button onClick={() => setQuickSelection('all')}>All</button><button onClick={() => { setSelectedPages(new Set()); setRange(''); }}>None</button><button onClick={() => setQuickSelection('odd')}>Odd</button><button onClick={() => setQuickSelection('even')}>Even</button></div></div>
+    <label className="pdf-tool-field split-range"><span>Pages or ranges</span><div><input value={range} disabled={busy} onChange={event => setRange(event.target.value)} placeholder="1-3, 5, 8-10" /><button className="secondary" disabled={busy} onClick={applyRange}>Apply</button></div><small>Click pages below or type ranges. Example: 1-3, 5, 8-10</small></label>
+    <div className="split-page-grid">{Array.from({ length: item.pages }, (_, index) => index + 1).map(number => <button key={number} disabled={busy} onClick={() => togglePage(number)} className={selectedPages.has(number) ? 'selected' : ''}><span>Page</span>{number}</button>)}</div>
+    {mode === 'chunks' && <label className="pdf-tool-field"><span>Pages in each output PDF</span><input type="number" min="1" max={item.pages} disabled={busy} value={chunkSize} onChange={event => setChunkSize(Math.max(1, Math.min(item.pages, Number(event.target.value) || 1)))} /><small>This creates {Math.ceil(item.pages / Math.max(1, Number(chunkSize) || 1))} PDF sets from all {item.pages} pages.</small></label>}
+    {mode === 'custom' && <label className="pdf-tool-field"><span>Custom page sets</span><input value={customSets} disabled={busy} onChange={event => setCustomSets(event.target.value)} placeholder="1-3 | 4-6 | 7, 9" /><small>Use | between output files. Example: 1-3 | 4-6 | 7, 9</small></label>}
+    <div className="split-output-note"><Scissors size={17} /><div><strong>{modeInfo[0]}</strong><p>{modeInfo[1]}</p></div></div>
+    {progress && <div className="compression-progress"><LoaderCircle className="spin" size={14} />{progress}</div>}
+    <button className="primary tool-main-action" disabled={busy || ((mode === 'extract' || mode === 'individual') && !selectedCount)} onClick={split}>{busy ? <LoaderCircle className="spin" size={16} /> : mode === 'extract' ? <Download size={16} /> : <Scissors size={16} />}{busy ? 'Creating files...' : mode === 'extract' ? 'Download extracted PDF' : mode === 'individual' ? 'Download separate PDFs as ZIP' : mode === 'chunks' ? 'Split full PDF to ZIP' : 'Create custom PDF sets'}</button>
+  </div>;
 }
 
 function DocumentBar({ item, icon, onReplace }) {
@@ -1977,7 +2064,7 @@ function PdfWorkspace() {
   const definitions = [
     ['merge', 'Merge PDF', 'Combine PDFs in the order you want.', <Layers3 size={25} />, 'coral'],
     ['organize', 'Organize PDF', 'Reorder, rotate, duplicate, and delete pages.', <Grid2X2 size={25} />, 'blue'],
-    ['split', 'Split PDF', 'Extract ranges or individual pages.', <Scissors size={25} />, 'orange'],
+    ['split', 'Split PDF', 'Extract pages, build sets, or split in batches.', <Scissors size={25} />, 'orange'],
     ['compress', 'Compress PDF', 'Optimize size without visible quality loss.', <Maximize2 size={25} />, 'green'],
     ['annotate', 'Annotate & Sign', 'Draw, highlight, redact, stamp, and sign.', <Move size={25} />, 'teal'],
     ['convert', 'Convert', 'Batch PDF to Word, Excel or PNG — plus images to PDF.', <RefreshCcw size={25} />, 'gold'],
