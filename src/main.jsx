@@ -2129,8 +2129,10 @@ function PhotoTools() {
       if (red > 225 && green > 225 && blue > 225 && Math.max(red, green, blue) - Math.min(red, green, blue) < 30) { minX = Math.min(minX, x); minY = Math.min(minY, y + startY); maxX = Math.max(maxX, x); maxY = Math.max(maxY, y + startY); hits++; }
     }
     if (hits < 40 || maxX - minX < 35 || maxY - minY < 14) return null;
-    const padding = 5;
-    return { x: Math.max(0, minX - padding), y: Math.max(0, minY - padding), width: Math.min(photo.width, maxX - minX + padding * 2), height: Math.min(photo.height, maxY - minY + padding * 2) };
+    // Keep the replacement patch exactly inside the original white rectangle.
+    // A large padding here would cover the photograph around the information box.
+    const padding = 1, left = Math.max(0, minX - padding), top = Math.max(0, minY - padding), right = Math.min(photo.width, maxX + padding), bottom = Math.min(photo.height, maxY + padding);
+    return { x: left, y: top, width: right - left, height: bottom - top };
   };
   const runOcr = async () => {
     if (!photo || !imageRef.current) return;
@@ -2146,12 +2148,21 @@ function PhotoTools() {
       (result.data.blocks || []).forEach(block => (block.paragraphs || []).forEach(paragraph => (paragraph.lines || []).forEach(line => line.text?.trim() && line.bbox && lines.push(line))));
       if (!lines.length) (result.data.words || []).forEach(word => word.text?.trim() && word.bbox && lines.push(word));
       checkpoint();
-      const detected = lines.map((line, index) => {
-        const box = line.bbox, x = box.x0 + (panel?.x || 0), y = box.y0 + (panel?.y || 0), height = Math.max(1, (box.y1 - box.y0) / photo.height * 100);
+      // NoteCam-style photos have one white information panel. Treat it as one
+      // multiline object: editing a value must not rebuild its layout as many
+      // separate OCR rectangles.
+      const orderedLines = [...lines].sort((first, second) => first.bbox.y0 - second.bbox.y0 || first.bbox.x0 - second.bbox.x0);
+      const detected = panel && orderedLines.length ? (() => {
+        const text = orderedLines.map(line => line.text.trim()).join('\n');
+        const averageHeight = orderedLines.reduce((total, line) => total + Math.max(1, line.bbox.y1 - line.bbox.y0), 0) / orderedLines.length;
+        const confidence = Math.round(orderedLines.reduce((total, line) => total + (line.confidence || 0), 0) / orderedLines.length);
+        return [{ id: crypto.randomUUID(), text, originalText: text, x: panel.x / photo.width * 100, y: panel.y / photo.height * 100, width: panel.width / photo.width * 100, height: panel.height / photo.height * 100, fontSize: Math.max(1, Math.min(4, averageHeight / photo.height * 100 * 1.04)), lineHeight: 1.12, color: '#111111', background: '#ffffff', backgroundOpacity: 100, font: 'Arial', align: 'left', source: 'ocr-panel', confidence }];
+      })() : orderedLines.map(line => {
+        const box = line.bbox, x = box.x0, y = box.y0, height = Math.max(1, (box.y1 - box.y0) / photo.height * 100);
         return { id: crypto.randomUUID(), text: line.text.trim(), originalText: line.text.trim(), x: x / photo.width * 100, y: y / photo.height * 100, width: Math.max(5, (box.x1 - box.x0) / photo.width * 100), height: Math.max(3.5, height * 1.32), fontSize: Math.max(1, Math.min(4, height * .94)), lineHeight: 1.08, color: '#111111', background: '#ffffff', backgroundOpacity: 92, font: 'Arial', align: 'left', source: 'ocr', confidence: Math.round(line.confidence || 0) };
       });
       setBoxes(current => ({ ...current, [photo.id]: detected })); setSelectedBoxId(detected[0]?.id || null);
-      await worker.terminate(); notify(detected.length ? `${detected.length} text areas found${panel ? ' in the white information panel' : ''}` : 'OCR could not find readable text');
+      await worker.terminate(); notify(detected.length ? (panel ? 'Information panel ready to edit' : `${detected.length} text areas found`) : 'OCR could not find readable text');
     } catch (error) { console.error(error); notify('OCR failed. Try a clearer image or another language.'); }
     setOcrProgress(null);
   };
@@ -2168,8 +2179,11 @@ function PhotoTools() {
     const canvas = document.createElement('canvas'); canvas.width = photo.width; canvas.height = photo.height;
     const context = canvas.getContext('2d'); context.drawImage(imageRef.current, 0, 0, photo.width, photo.height);
     boxes.forEach(box => {
+      // Untouched OCR is only a selectable guide. Keep the source photo fully
+      // unchanged until the user changes the recognised writing.
+      if (box.source?.startsWith('ocr') && box.text === box.originalText) return;
       const x = photo.width * box.x / 100, y = photo.height * box.y / 100, width = photo.width * box.width / 100, height = photo.height * box.height / 100;
-      context.save(); context.globalAlpha = Math.max(0, Math.min(100, box.backgroundOpacity ?? 92)) / 100; context.fillStyle = box.background || '#ffffff'; context.fillRect(x, y, width, height);
+      context.save(); context.globalAlpha = Math.max(0, Math.min(100, box.backgroundOpacity ?? 92)) / 100; context.fillStyle = box.background || '#ffffff'; context.fillRect(x, y, width, height); context.beginPath(); context.rect(x, y, width, height); context.clip();
       context.globalAlpha = 1; context.fillStyle = box.color || '#111111'; context.font = `${Math.max(8, photo.height * box.fontSize / 100)}px ${box.font || 'Arial'}`; context.textBaseline = 'top'; context.textAlign = box.align || 'left';
       const anchor = box.align === 'center' ? x + width / 2 : box.align === 'right' ? x + width - 3 : x + 3, lineHeight = Math.max(9, photo.height * box.fontSize / 100 * (box.lineHeight || 1.1));
       String(box.text || '').split(/\r?\n/).forEach((line, index) => context.fillText(line, anchor, y + 2 + index * lineHeight, Math.max(1, width - 6)));

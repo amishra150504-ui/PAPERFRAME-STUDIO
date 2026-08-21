@@ -1,4 +1,4 @@
-const CACHE = 'paperframe-v23';
+const CACHE = 'paperframe-v24';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/assets/paperframe-logo.png', '/assets/paperframe-icon-192.png'];
 
 self.addEventListener('install', event => {
