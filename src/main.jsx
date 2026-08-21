@@ -260,7 +260,7 @@ function PhotoEditorPanel({ photo, selectedCount, onUpdate, onDelete, onDuplicat
   </div>;
 }
 
-function PhotoWorkspace() {
+function PhotoWorkspace({ initialTool = 'layout', onExit }) {
   const saved = (() => { try { return JSON.parse(localStorage.getItem('paperframe-settings')); } catch { return null; } })();
   const requestedOrientation = new URLSearchParams(window.location.search).get('orientation');
   const [settings, setSettings] = useState({
@@ -280,7 +280,7 @@ function PhotoWorkspace() {
   const [assetDropIndex, setAssetDropIndex] = useState(null);
   const [stampEditingId, setStampEditingId] = useState(null);
   const [leftOpen, setLeftOpen] = useState(true);
-  const [rightTab, setRightTab] = useState('layout');
+  const [rightTab, setRightTab] = useState(initialTool === 'editor' || initialTool === 'batch' ? 'photo' : 'layout');
   const [toast, setToast] = useState('');
   const [exporting, setExporting] = useState(false);
   const fileRef = useRef();
@@ -612,7 +612,7 @@ function PhotoWorkspace() {
 
     <main className="canvas-area">
       <div className="canvas-toolbar">
-        <div className="crumb"><span>Untitled project</span><small>{saveStatus}</small></div>
+        <div className="crumb">{onExit && <button className="workspace-back" onClick={onExit}><ArrowLeft size={13} /> Photo tools</button>}<span>{initialTool === 'editor' ? 'Photo editor' : initialTool === 'batch' ? 'Batch photo editor' : initialTool === 'print' ? 'Print & export' : 'Untitled project'}</span><small>{saveStatus}</small></div>
         <div className="history">
           <IconButton label="Undo" disabled={!undoStack.length} onClick={undo}><Undo2 size={17} /></IconButton>
           <IconButton label="Redo" disabled={!redoStack.length} onClick={redo}><Redo2 size={17} /></IconButton>
@@ -917,7 +917,7 @@ function MergeTool({ notify }) {
 function SplitTool({ notify }) {
   const [item, setItem] = useState(null), [range, setRange] = useState('1'), [selectedPages, setSelectedPages] = useState(new Set());
   const [mode, setMode] = useState('extract'), [chunkSize, setChunkSize] = useState(1), [customSets, setCustomSets] = useState('1-2 | 3-4');
-  const [busy, setBusy] = useState(false), [progress, setProgress] = useState('');
+  const [busy, setBusy] = useState(false), [progress, setProgress] = useState(''), [previewStart, setPreviewStart] = useState(0);
   const baseName = item?.name.replace(/\.pdf$/i, '') || 'paperframe';
   const formatPages = pages => {
     const sorted = [...new Set(pages)].sort((a, b) => a - b), segments = [];
@@ -1001,16 +1001,16 @@ function SplitTool({ notify }) {
     } catch (error) { notify(error.message || 'Could not split this PDF'); }
     setProgress(''); setBusy(false);
   };
-  const reset = () => { setItem(null); setSelectedPages(new Set()); setProgress(''); };
+  const reset = () => { setItem(null); setSelectedPages(new Set()); setProgress(''); setPreviewStart(0); };
   const add = async files => {
     try {
       const loaded = await loadPdfItem(files[0]), pages = Array.from({ length: loaded.pages }, (_, index) => index + 1), halfway = Math.ceil(loaded.pages / 2);
-      setItem(loaded); setSelectedPages(new Set(pages)); setRange(formatPages(pages)); setCustomSets(loaded.pages > 1 ? `1-${halfway} | ${halfway + 1}-${loaded.pages}` : '1');
+      setItem(loaded); setSelectedPages(new Set(pages)); setRange(formatPages(pages)); setCustomSets(loaded.pages > 1 ? `1-${halfway} | ${halfway + 1}-${loaded.pages}` : '1'); setPreviewStart(0);
       if (loaded.repaired) notify('Incomplete image-only PDF repaired automatically');
     } catch { notify('Could not read this PDF'); }
   };
   if (!item) return <ToolDrop title="Drop one PDF to split" onFiles={add} />;
-  const selectedCount = selectedPages.size, modeInfo = {
+  const selectedCount = selectedPages.size, previewSize = 24, previewEnd = Math.min(item.pages, previewStart + previewSize), previewNumbers = Array.from({ length: previewEnd - previewStart }, (_, index) => previewStart + index + 1), modeInfo = {
     extract: ['Extract selected pages', 'One clean PDF containing your selected pages.'],
     individual: ['Create one PDF per selected page', 'All files are packed into one ZIP download.'],
     chunks: ['Split the full PDF into equal sets', 'Every page is included, grouped by your chosen set size.'],
@@ -1023,7 +1023,8 @@ function SplitTool({ notify }) {
     ].map(([id, title, description]) => <button key={id} className={mode === id ? 'selected' : ''} disabled={busy} onClick={() => setMode(id)}><strong>{title}</strong><small>{description}</small></button>)}</div>
     <div className="split-selection-heading"><div><strong>Page selection</strong><small>{selectedCount} of {item.pages} pages selected</small></div><div><button onClick={() => setQuickSelection('all')}>All</button><button onClick={() => { setSelectedPages(new Set()); setRange(''); }}>None</button><button onClick={() => setQuickSelection('odd')}>Odd</button><button onClick={() => setQuickSelection('even')}>Even</button></div></div>
     <label className="pdf-tool-field split-range"><span>Pages or ranges</span><div><input value={range} disabled={busy} onChange={event => setRange(event.target.value)} placeholder="1-3, 5, 8-10" /><button className="secondary" disabled={busy} onClick={applyRange}>Apply</button></div><small>Click pages below or type ranges. Example: 1-3, 5, 8-10</small></label>
-    <div className="split-page-grid">{Array.from({ length: item.pages }, (_, index) => index + 1).map(number => <button key={number} disabled={busy} onClick={() => togglePage(number)} className={selectedPages.has(number) ? 'selected' : ''}><span>Page</span>{number}</button>)}</div>
+    <div className="split-preview-heading"><strong>Visual page preview</strong><span>Pages {previewStart + 1}-{previewEnd} of {item.pages}</span><div><IconButton label="Previous preview pages" disabled={!previewStart || busy} onClick={() => setPreviewStart(value => Math.max(0, value - previewSize))}><ArrowLeft size={14} /></IconButton><IconButton label="Next preview pages" disabled={previewEnd >= item.pages || busy} onClick={() => setPreviewStart(value => Math.min(Math.max(0, item.pages - previewSize), value + previewSize))}><ArrowRight size={14} /></IconButton></div></div>
+    <div className="split-page-grid split-preview-grid">{previewNumbers.map(number => <button key={number} disabled={busy} onClick={() => togglePage(number)} className={selectedPages.has(number) ? 'selected' : ''}><div className="split-page-preview"><PdfPageThumbnail item={item} pageIndex={number - 1} rotation={0} /></div><span>Page {number}</span><i>{selectedPages.has(number) ? 'Selected' : 'Click to select'}</i></button>)}</div>
     {mode === 'chunks' && <label className="pdf-tool-field"><span>Pages in each output PDF</span><input type="number" min="1" max={item.pages} disabled={busy} value={chunkSize} onChange={event => setChunkSize(Math.max(1, Math.min(item.pages, Number(event.target.value) || 1)))} /><small>This creates {Math.ceil(item.pages / Math.max(1, Number(chunkSize) || 1))} PDF sets from all {item.pages} pages.</small></label>}
     {mode === 'custom' && <label className="pdf-tool-field"><span>Custom page sets</span><input value={customSets} disabled={busy} onChange={event => setCustomSets(event.target.value)} placeholder="1-3 | 4-6 | 7, 9" /><small>Use | between output files. Example: 1-3 | 4-6 | 7, 9</small></label>}
     <div className="split-output-note"><Scissors size={17} /><div><strong>{modeInfo[0]}</strong><p>{modeInfo[1]}</p></div></div>
@@ -1146,15 +1147,17 @@ function CompressTool({ notify }) {
       : <div className="compression-actions"><button className="secondary" disabled={busy} onClick={optimize}><Maximize2 size={15} /> Try again</button><button className="primary" onClick={() => savePdf(result.bytes, `${item.name.replace(/\.pdf$/i, '')}-compressed.pdf`)}><Download size={16} /> Download compressed PDF</button></div>}</div>;
 }
 
-function PdfPageThumbnail({ bytes, pageIndex, rotation }) {
+function PdfPageThumbnail({ bytes, item, pageIndex, rotation }) {
   const ref = useRef();
   useEffect(() => {
     let cancelled = false, loading;
     (async () => {
       try {
-        const data = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes.slice(0));
-        loading = pdfjsLib.getDocument({ data });
-        const pdf = await loading.promise, page = await pdf.getPage(pageIndex + 1);
+        const pdf = item ? await getPdfJsDocument(item) : await (() => {
+          const data = bytes instanceof Uint8Array ? bytes.slice() : new Uint8Array(bytes.slice(0));
+          loading = pdfjsLib.getDocument({ data }); return loading.promise;
+        })();
+        const page = await pdf.getPage(pageIndex + 1);
         const base = page.getViewport({ scale: 1, rotation }), scale = Math.min(110 / base.width, 135 / base.height);
         const viewport = page.getViewport({ scale, rotation }), canvas = ref.current;
         if (!canvas || cancelled) return;
@@ -1163,7 +1166,7 @@ function PdfPageThumbnail({ bytes, pageIndex, rotation }) {
       } catch { /* Thumbnail remains as a page placeholder. */ }
     })();
     return () => { cancelled = true; loading?.destroy(); };
-  }, [bytes, pageIndex, rotation]);
+  }, [bytes, item, pageIndex, rotation]);
   return <canvas ref={ref} />;
 }
 
@@ -2054,6 +2057,22 @@ function EditTool({ notify }) {
   </div>;
 }
 
+function PhotoTools() {
+  const [active, setActive] = useState(null);
+  const definitions = [
+    ['layout', 'A4 Photo Layout', 'Arrange any number of photos into A4 grids, with exact margins and print sizing.', <Grid2X2 size={25} />, 'coral'],
+    ['editor', 'Photo Editor', 'Crop, rotate, mirror, improve colour, and edit photo writing directly on the page.', <Crop size={25} />, 'blue'],
+    ['batch', 'Batch Photo Editor', 'Select multiple photos, apply one format, then fine-tune each image when needed.', <Copy size={25} />, 'purple'],
+    ['print', 'Print & Export', 'Build a print-ready A4 PDF and print every generated page in one operation.', <Printer size={25} />, 'green']
+  ];
+  if (active) return <PhotoWorkspace initialTool={active} onExit={() => setActive(null)} />;
+  return <div className="pdf-workspace new-pdf-tools photo-tools-hub"><div className="pdf-hero tool-hero"><div><span className="eyebrow"><Sparkles size={13} /> PRIVATE PHOTO STUDIO</span><h1>Prepare every photo for print.</h1><p>Arrange, edit, batch-format, and export photos without uploading them anywhere.</p></div></div>
+    <div className="pdf-tool-shell"><div className="pdf-tool-cards photo-tool-cards">{definitions.map(([id, title, description, icon, color]) => <button key={id} className={`pdf-tool-card ${color}`} onClick={() => setActive(id)}>
+      <span className="tool-card-icon">{icon}</span><strong>{title}</strong><p>{description}</p><span>Open studio <ArrowRight size={14} /></span></button>)}</div>
+      <div className="photo-tools-note"><ImageIcon size={19} /><div><strong>One connected photo workspace</strong><p>Every tool opens the same local project, so your uploads, adjustments, pages, and print settings stay together.</p></div><button className="primary" onClick={() => setActive('layout')}>Start a photo layout <ArrowRight size={15} /></button></div>
+    </div></div>;
+}
+
 function PdfWorkspace() {
   const [active, setActive] = useState('merge'), [toast, setToast] = useState('');
   const notify = message => { setToast(message); setTimeout(() => setToast(''), 2600); };
@@ -2090,12 +2109,12 @@ function App() {
     <header className="app-header">
       <button className="brand" onClick={() => setMode('photos')}><span className="brand-mark"><img src="/assets/paperframe-header.png" alt="" /></span><span>Paperframe<small>STUDIO</small></span></button>
       <nav>
-        <button className={mode === 'photos' ? 'active' : ''} onClick={() => setMode('photos')}><ImageIcon size={16} /> Photo layout</button>
+        <button className={mode === 'photos' ? 'active' : ''} onClick={() => setMode('photos')}><ImageIcon size={16} /> Photo tools</button>
         <button className={mode === 'pdf' ? 'active' : ''} onClick={() => setMode('pdf')}><FileText size={16} /> PDF tools</button>
       </nav>
       <div className="header-right"><div className="creator-credit" title="Created by Ayushman Mishra"><img src="/assets/ayushman-mishra-creator.png" alt="Ayushman Mishra" /><span><small>CREATED BY</small><strong>Ayushman Mishra</strong></span></div><a className="privacy" href="/privacy.html" title="Read the privacy policy"><span /> Private by design</a><a className="help" href="/about.html" aria-label="About Paperframe Studio" title="About Paperframe Studio"><Info size={15} /></a></div>
     </header>
-    {mode === 'photos' ? <PhotoWorkspace /> : <PdfWorkspace />}
+    {mode === 'photos' ? <PhotoTools /> : <PdfWorkspace />}
   </div>;
 }
 
